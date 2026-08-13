@@ -1,0 +1,31 @@
+﻿{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "pluginname",
+  "version-string": "0.1",
+  "dependencies": [
+    "fast-cpp-csv-parser",
+    "rsm-binary-io",
+    "spdlog",
+    "xbyak",
+    "rapidcsv",
+    "clib-util",
+    "clib-utils-qtr",
+    "directxtk",
+    "skse-mcp",
+    "glm",
+    "detours",
+    "rapidjson",
+    "nlohmann-json",
+    "miniz",
+    "stb",
+    "simpleini",
+    "minhook"
+  ],
+  "overrides": [
+    {
+      "name": "fmt",
+      "version": "9.1.0"
+    }
+  ],
+  "builtin-baseline": "ee12231b20c95013c6638d845d04c91559a1d1ff"
+}
