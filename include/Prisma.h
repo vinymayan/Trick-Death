@@ -1,10 +1,14 @@
 #pragma once
 
 class Prisma {
-    static inline bool createdView = false;
 public:
     static void Install();
-    static void Show();
+    static void Preload();
     static void Hide();
     static bool IsHidden();
+    static bool IsReady();
+    static bool CanShow();
+    static void ShowDeathMenu(bool checkpointAvailable);
+    static void ShowError(const char* message);
+    static void ApplyUISettings();
 };

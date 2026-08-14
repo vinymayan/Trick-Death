@@ -1,0 +1,25 @@
+{
+  "menu": {
+    "section": "Trick Death",
+    "gameplay": "Gameplay",
+    "ui": "UI",
+    "enabled": "Enable Trick Death",
+    "pause_game": "Pause game while the death menu is open",
+    "stop_combat": "Stop combat on defeat",
+    "health": "Respawn health (%)",
+    "magicka": "Respawn magicka (%)",
+    "stamina": "Respawn stamina (%)",
+    "invulnerability": "Invulnerability after respawn (seconds)",
+    "background_opacity": "Background opacity (%)",
+    "background_blur": "Background blur (px)",
+    "scale": "Menu scale (%)",
+    "reset_ui": "Reset UI settings"
+  },
+  "ui": {
+    "title": "DEFEATED",
+    "checkpoint": "Respawn at last sleep checkpoint",
+    "respawn": "Respawn here",
+    "load": "Load last save",
+    "no_checkpoint": "No sleep checkpoint available"
+  }
+}

@@ -22,9 +22,9 @@ add_include_folder(vendor/include)
 
 
 cmake_minimum_required(VERSION 3.21)
-set(AUTHOR_NAME "AUTHOR_NAME")
-set(PRODUCT_NAME "PluginName")
-set(BEAUTIFUL_NAME "Plugin Name")
+set(AUTHOR_NAME "Viny")
+set(PRODUCT_NAME "DeathTrick")
+set(BEAUTIFUL_NAME "Trick Death")
 
 project(${PRODUCT_NAME} VERSION 3.0.0.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 23)
@@ -125,6 +125,7 @@ target_include_directories(
 	PRIVATE
     ${header_dirs}
     ${CLIB_UTIL_INCLUDE_DIRS}
+    ${SKSE_MCP_INCLUDE_DIRS}
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 

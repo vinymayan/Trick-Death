@@ -1,1 +1,113 @@
-﻿
+.death-screen {
+    position: fixed;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    overflow: hidden;
+    color: #eee9df;
+    font-family: Georgia, 'Times New Roman', serif;
+}
+
+.death-background {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+}
+
+.death-background {
+    object-fit: cover;
+    transform: scale(1.06);
+}
+
+.death-panel {
+    position: relative;
+    width: min(760px, 76vw);
+    transform-origin: center;
+    text-align: center;
+}
+
+.death-panel h1 {
+    margin: 26px 0 34px;
+    color: #a91418;
+    font-size: clamp(44px, 7vw, 92px);
+    font-weight: 400;
+    letter-spacing: 0.22em;
+    line-height: 1;
+}
+
+.death-rule {
+    width: 68%;
+    height: 1px;
+    margin: 0 auto;
+    background: #8e8170;
+}
+
+.death-rule.bottom {
+    margin-top: 30px;
+}
+
+.death-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.death-action {
+    display: grid;
+    grid-template-columns: 54px 1fr 54px;
+    align-items: center;
+    min-height: 62px;
+    padding: 8px 18px;
+    border: 1px solid #766d61;
+    background: rgba(12, 13, 14, 0.86);
+    color: #e7e0d4;
+    font: inherit;
+    font-size: 21px;
+    letter-spacing: 0.035em;
+    cursor: pointer;
+}
+
+.death-action::after {
+    content: '';
+}
+
+.death-action:hover,
+.death-action:focus-visible {
+    border-color: #c8b89f;
+    background: rgba(45, 38, 33, 0.94);
+    color: #fffaf0;
+    outline: 2px solid #a91418;
+    outline-offset: 2px;
+}
+
+.death-action:disabled {
+    border-color: #413d38;
+    color: #716d67;
+    cursor: default;
+}
+
+.death-action:disabled:hover {
+    background: rgba(12, 13, 14, 0.86);
+    outline: 0;
+}
+
+.action-index {
+    justify-self: start;
+    color: #a91418;
+    font-size: 16px;
+}
+
+.checkpoint-warning,
+.death-error {
+    margin: -4px 0 2px;
+    color: #aaa39a;
+    font-family: Arial, sans-serif;
+    font-size: 13px;
+}
+
+.death-error {
+    margin-top: 18px;
+    color: #e08b82;
+    font-size: 15px;
+}

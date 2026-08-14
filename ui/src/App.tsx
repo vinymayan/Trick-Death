@@ -1,7 +1,95 @@
-﻿import { createSignal, createEffect, For, Show, onMount, onCleanup } from 'solid-js'
-import { Portal } from 'solid-js/web';
-import { createStore } from 'solid-js/store'
+import { onMount, Show, createSignal } from 'solid-js';
+import './app.css';
+import { checkpointAvailable, errorMessage, settings, visible } from './bridge';
 
-function App() {}
+type DeathAction = 'respawn_checkpoint' | 'respawn_here' | 'load_last_save';
+
+const supportedBackgroundExtensions = ['svg', 'png', 'webp', 'jpg', 'jpeg', 'gif', 'avif'];
+
+function findBackground(): Promise<string> {
+    const candidates = supportedBackgroundExtensions.map((extension) => `./assets/Background.${extension}`);
+    return new Promise((resolve) => {
+        let index = 0;
+        const tryNext = () => {
+            if (index >= candidates.length) {
+                resolve('');
+                return;
+            }
+            const candidate = candidates[index++];
+            const image = new Image();
+            image.onload = () => resolve(candidate);
+            image.onerror = tryNext;
+            image.src = candidate;
+        };
+        tryNext();
+    });
+}
+
+function dispatchAction(action: DeathAction) {
+    if (typeof window.deathMenuAction === 'function') {
+        window.deathMenuAction(action);
+    }
+}
+
+function App() {
+    const [background, setBackground] = createSignal('');
+    onMount(() => void findBackground().then(setBackground));
+
+    return (
+        <Show when={visible()}>
+            <main
+                class="death-screen"
+                aria-modal="true"
+                role="dialog"
+                aria-labelledby="death-title"
+            >
+                <Show when={background()}>
+                    <img
+                        class="death-background"
+                        src={background()}
+                        alt=""
+                        style={{
+                            opacity: String(settings().backgroundOpacityPercent / 100),
+                            filter: `blur(${settings().backgroundBlurPixels}px)`,
+                        }}
+                    />
+                </Show>
+                <section
+                    class="death-panel"
+                    style={{ transform: `scale(${settings().scalePercent / 100})` }}
+                >
+                    <div class="death-rule" />
+                    <h1 id="death-title">{settings().labels.title}</h1>
+                    <div class="death-actions">
+                        <button
+                            class="death-action"
+                            disabled={!checkpointAvailable()}
+                            title={!checkpointAvailable() ? settings().labels.noCheckpoint : ''}
+                            onClick={() => dispatchAction('respawn_checkpoint')}
+                        >
+                            <span class="action-index">I</span>
+                            <span>{settings().labels.checkpoint}</span>
+                        </button>
+                        <Show when={!checkpointAvailable()}>
+                            <p class="checkpoint-warning">{settings().labels.noCheckpoint}</p>
+                        </Show>
+                        <button class="death-action" onClick={() => dispatchAction('respawn_here')}>
+                            <span class="action-index">II</span>
+                            <span>{settings().labels.respawn}</span>
+                        </button>
+                        <button class="death-action" onClick={() => dispatchAction('load_last_save')}>
+                            <span class="action-index">III</span>
+                            <span>{settings().labels.load}</span>
+                        </button>
+                    </div>
+                    <Show when={errorMessage()}>
+                        <p class="death-error" role="alert">{errorMessage()}</p>
+                    </Show>
+                    <div class="death-rule bottom" />
+                </section>
+            </main>
+        </Show>
+    );
+}
 
 export default App;
