@@ -6,10 +6,14 @@ export type DeathMenuSettings = {
     scalePercent: number;
     labels: {
         title: string;
+        lastSleep: string;
         checkpoint: string;
         respawn: string;
         load: string;
-        noCheckpoint: string;
+        unavailableHere: string;
+        unavailableLastSleep: string;
+        unavailableCheckpoint: string;
+        unavailableLoad: string;
     };
 };
 
@@ -19,16 +23,20 @@ const defaults: DeathMenuSettings = {
     scalePercent: 100,
     labels: {
         title: 'DEFEATED',
-        checkpoint: 'Respawn at last sleep checkpoint',
+        lastSleep: 'Respawn at last place slept',
+        checkpoint: 'Respawn at last checkpoint',
         respawn: 'Respawn here',
         load: 'Load last save',
-        noCheckpoint: 'No sleep checkpoint available',
+        unavailableHere: 'Respawn here is blocked',
+        unavailableLastSleep: 'No available last-sleep destination',
+        unavailableCheckpoint: 'No available external checkpoint',
+        unavailableLoad: 'Loading the last save is blocked',
     },
 };
 
 export const [settings, setSettings] = createSignal<DeathMenuSettings>(defaults);
 export const [visible, setVisible] = createSignal(false);
-export const [checkpointAvailable, setCheckpointAvailable] = createSignal(false);
+export const [availableRespawns, setAvailableRespawns] = createSignal(0);
 export const [errorMessage, setErrorMessage] = createSignal('');
 
 declare global {
@@ -59,7 +67,8 @@ window.applyDeathMenuSettings = (payload: string) => {
 };
 
 window.showDeathMenu = (payload: string) => {
-    setCheckpointAvailable(payload === '1');
+    const parsed = Number.parseInt(payload, 10);
+    setAvailableRespawns(Number.isFinite(parsed) ? parsed : 0);
     setErrorMessage('');
     setVisible(true);
     window.setTimeout(() => document.querySelector<HTMLButtonElement>('.death-action:not(:disabled)')?.focus(), 0);

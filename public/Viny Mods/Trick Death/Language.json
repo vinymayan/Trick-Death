@@ -3,8 +3,14 @@
     "section": "Trick Death",
     "gameplay": "Gameplay",
     "ui": "UI",
+    "diagnostics": "Diagnostics",
+    "api_debug": "API Debug",
     "enabled": "Enable Trick Death",
     "pause_game": "Pause game while the death menu is open",
+    "defeat_pose": "Defeat pose",
+    "pose_bleedout": "Bleedout",
+    "pose_ragdoll": "Ragdoll (vanilla get-up)",
+    "pose_persistent_ragdoll": "Persistent ragdoll (Nemesis patch)",
     "stop_combat": "Stop combat on defeat",
     "health": "Respawn health (%)",
     "magicka": "Respawn magicka (%)",
@@ -17,9 +23,13 @@
   },
   "ui": {
     "title": "DEFEATED",
-    "checkpoint": "Respawn at last sleep checkpoint",
+    "last_sleep": "Respawn at last place slept",
+    "checkpoint": "Respawn at last checkpoint",
     "respawn": "Respawn here",
     "load": "Load last save",
-    "no_checkpoint": "No sleep checkpoint available"
+    "unavailable_here": "Respawn here is blocked",
+    "unavailable_last_sleep": "No available last-sleep destination",
+    "unavailable_checkpoint": "No available external checkpoint",
+    "unavailable_load": "Loading the last save is blocked"
   }
 }

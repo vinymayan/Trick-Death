@@ -18,8 +18,9 @@ void PlayerAnimationSink::Install() {
 
     if (auto source = RE::ScriptEventSourceHolder::GetSingleton()) {
         source->AddEventSink<RE::TESObjectLoadedEvent>(this);
+        source->AddEventSink<RE::TESHitEvent>(this);
         installed_ = true;
-        logger::info("Player animation sink load listener installed.");
+        logger::info("Player animation, hit and load listeners installed.");
     } else {
         logger::error("Could not install the player 3D load listener.");
     }
@@ -37,25 +38,48 @@ void PlayerAnimationSink::ScheduleRegistration(std::uint32_t attempt) {
         return;
     }
 
+    bool expected = false;
+    if (!registrationScheduled_.compare_exchange_strong(expected, true)) {
+        return;
+    }
+
     Utils::DelayedDispatcher::Get().PostDelayed(std::chrono::milliseconds(100), [attempt] {
         SKSE::GetTaskInterface()->AddTask([attempt] {
+            auto sink = PlayerAnimationSink::GetSingleton();
+            sink->registrationScheduled_.store(false);
+
             auto player = RE::PlayerCharacter::GetSingleton();
             if (!player) {
-                PlayerAnimationSink::GetSingleton()->ScheduleRegistration(attempt + 1);
+                sink->ScheduleRegistration(attempt + 1);
                 return;
             }
 
             RE::BSTSmartPointer<RE::BSAnimationGraphManager> graphManager;
             player->GetAnimationGraphManager(graphManager);
             if (!graphManager) {
-                PlayerAnimationSink::GetSingleton()->ScheduleRegistration(attempt + 1);
+                sink->ScheduleRegistration(attempt + 1);
                 return;
             }
 
-            auto sink = PlayerAnimationSink::GetSingleton();
-            player->RemoveAnimationGraphEventSink(sink);
-            if (player->AddAnimationGraphEventSink(sink)) {
-                logger::info("Player animation sink attached.");
+            std::size_t attachedGraphs = 0;
+            for (auto& graph : graphManager->graphs) {
+                if (!graph) {
+                    continue;
+                }
+
+                auto* eventSource =
+                    static_cast<RE::BSTEventSource<RE::BSAnimationGraphEvent>*>(graph.get());
+                eventSource->RemoveEventSink(sink);
+                eventSource->AddEventSink(sink);
+                logger::info(
+                    "Player animation sink attached graphIndex={} graphSource=0x{:X}.",
+                    attachedGraphs,
+                    reinterpret_cast<std::uintptr_t>(eventSource));
+                ++attachedGraphs;
+            }
+
+            if (attachedGraphs > 0) {
+                logger::info("Player animation sink attached to {} graph(s).", attachedGraphs);
             } else {
                 logger::warn("Player animation sink registration was rejected; retrying.");
                 sink->ScheduleRegistration(attempt + 1);
@@ -66,7 +90,7 @@ void PlayerAnimationSink::ScheduleRegistration(std::uint32_t attempt) {
 
 RE::BSEventNotifyControl PlayerAnimationSink::ProcessEvent(
     const RE::BSAnimationGraphEvent* event,
-    RE::BSTEventSource<RE::BSAnimationGraphEvent>*) {
+    RE::BSTEventSource<RE::BSAnimationGraphEvent>* eventSource) {
     if (!event || !event->holder) {
         return RE::BSEventNotifyControl::kContinue;
     }
@@ -75,7 +99,19 @@ RE::BSEventNotifyControl PlayerAnimationSink::ProcessEvent(
         return RE::BSEventNotifyControl::kContinue;
     }
 
-    DeathManager::HandlePlayerAnimationEvent(std::string_view(event->tag));
+    DeathManager::HandlePlayerAnimationEvent(
+        std::string_view(event->tag),
+        std::string_view(event->payload),
+        reinterpret_cast<std::uintptr_t>(eventSource));
+    return RE::BSEventNotifyControl::kContinue;
+}
+
+RE::BSEventNotifyControl PlayerAnimationSink::ProcessEvent(
+    const RE::TESHitEvent* event,
+    RE::BSTEventSource<RE::TESHitEvent>*) {
+    if (event) {
+        DeathManager::HandlePlayerHitEvent(*event);
+    }
     return RE::BSEventNotifyControl::kContinue;
 }
 

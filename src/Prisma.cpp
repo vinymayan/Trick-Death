@@ -3,6 +3,7 @@
 #include "Configuration.h"
 #include "DeathManager.h"
 #include "PrismaUI_API.h"
+#include "TextManager.h"
 
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
@@ -14,9 +15,34 @@ namespace {
     bool focused = false;
     bool menuVisible = false;
     bool pendingShow = false;
-    bool pendingCheckpointAvailable = false;
+    std::uint32_t pendingAvailableRespawns = 0;
 
     std::string BuildSettingsPayload() {
+        const auto title = TextManager::ResolveSlot("title", ModMenu::GetLoc("ui.title", "DEFEATED"));
+        const auto lastSleep = TextManager::ResolveSlot(
+            "respawn_last_sleep",
+            ModMenu::GetLoc("ui.last_sleep", "Respawn at last place slept"));
+        const auto checkpoint = TextManager::ResolveSlot(
+            "respawn_checkpoint",
+            ModMenu::GetLoc("ui.checkpoint", "Respawn at last checkpoint"));
+        const auto respawnHere = TextManager::ResolveSlot(
+            "respawn_here",
+            ModMenu::GetLoc("ui.respawn", "Respawn here"));
+        const auto load = TextManager::ResolveSlot(
+            "load_last_save",
+            ModMenu::GetLoc("ui.load", "Load last save"));
+        const auto unavailableHere = TextManager::ResolveSlot(
+            "unavailable_here",
+            ModMenu::GetLoc("ui.unavailable_here", "Respawn here is blocked"));
+        const auto unavailableLastSleep = TextManager::ResolveSlot(
+            "unavailable_last_sleep",
+            ModMenu::GetLoc("ui.unavailable_last_sleep", "No available last-sleep destination"));
+        const auto unavailableCheckpoint = TextManager::ResolveSlot(
+            "unavailable_checkpoint",
+            ModMenu::GetLoc("ui.unavailable_checkpoint", "No available external checkpoint"));
+        const auto unavailableLoad = TextManager::ResolveSlot(
+            "unavailable_load",
+            ModMenu::GetLoc("ui.unavailable_load", "Loading the last save is blocked"));
         rapidjson::StringBuffer buffer;
         rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
         writer.StartObject();
@@ -29,15 +55,23 @@ namespace {
         writer.Key("labels");
         writer.StartObject();
         writer.Key("title");
-        writer.String(ModMenu::GetLoc("ui.title", "DEFEATED"));
+        writer.String(title.c_str());
+        writer.Key("lastSleep");
+        writer.String(lastSleep.c_str());
         writer.Key("checkpoint");
-        writer.String(ModMenu::GetLoc("ui.checkpoint", "Respawn at last sleep checkpoint"));
+        writer.String(checkpoint.c_str());
         writer.Key("respawn");
-        writer.String(ModMenu::GetLoc("ui.respawn", "Respawn here"));
+        writer.String(respawnHere.c_str());
         writer.Key("load");
-        writer.String(ModMenu::GetLoc("ui.load", "Load last save"));
-        writer.Key("noCheckpoint");
-        writer.String(ModMenu::GetLoc("ui.no_checkpoint", "No sleep checkpoint available"));
+        writer.String(load.c_str());
+        writer.Key("unavailableHere");
+        writer.String(unavailableHere.c_str());
+        writer.Key("unavailableLastSleep");
+        writer.String(unavailableLastSleep.c_str());
+        writer.Key("unavailableCheckpoint");
+        writer.String(unavailableCheckpoint.c_str());
+        writer.Key("unavailableLoad");
+        writer.String(unavailableLoad.c_str());
         writer.EndObject();
         writer.EndObject();
         return buffer.GetString();
@@ -51,16 +85,17 @@ namespace {
         prismaUI->InteropCall(view, "applyDeathMenuSettings", payload.c_str());
     }
 
-    void SendShow(bool checkpointAvailable) {
+    void SendShow(std::uint32_t availableRespawns) {
         if (!prismaUI || !view || !domReady || !prismaUI->IsValid(view)) {
             pendingShow = true;
-            pendingCheckpointAvailable = checkpointAvailable;
+            pendingAvailableRespawns = availableRespawns;
             return;
         }
 
         SendSettings();
         prismaUI->Show(view);
-        prismaUI->InteropCall(view, "showDeathMenu", checkpointAvailable ? "1" : "0");
+        const auto payload = std::to_string(availableRespawns);
+        prismaUI->InteropCall(view, "showDeathMenu", payload.c_str());
         if (focused) {
             prismaUI->Unfocus(view);
             focused = false;
@@ -93,7 +128,7 @@ namespace {
             domReady = true;
             SendSettings();
             if (pendingShow) {
-                SendShow(pendingCheckpointAvailable);
+                SendShow(pendingAvailableRespawns);
             } else {
                 prismaUI->Hide(view);
             }
@@ -155,11 +190,11 @@ bool Prisma::CanShow() {
     return prismaUI && CreateView();
 }
 
-void Prisma::ShowDeathMenu(bool checkpointAvailable) {
+void Prisma::ShowDeathMenu(std::uint32_t availableRespawns) {
     pendingShow = true;
-    pendingCheckpointAvailable = checkpointAvailable;
+    pendingAvailableRespawns = availableRespawns;
     if (CreateView()) {
-        SendShow(checkpointAvailable);
+        SendShow(availableRespawns);
     }
 }
 

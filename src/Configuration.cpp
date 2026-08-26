@@ -1,6 +1,11 @@
 #include "Configuration.h"
 
+#include "APIDebugMenu.h"
+#include "CheckpointManager.h"
+#include "IntegrationEvents.h"
 #include "Prisma.h"
+#include "RespawnPolicyManager.h"
+#include "TextManager.h"
 
 #include <rapidjson/document.h>
 #include <rapidjson/istreamwrapper.h>
@@ -48,6 +53,10 @@ namespace {
         Settings::Gameplay.magickaPercent = std::clamp(Settings::Gameplay.magickaPercent, 0, 100);
         Settings::Gameplay.staminaPercent = std::clamp(Settings::Gameplay.staminaPercent, 0, 100);
         Settings::Gameplay.invulnerabilitySeconds = std::clamp(Settings::Gameplay.invulnerabilitySeconds, 0, 30);
+        Settings::Gameplay.defeatPose = std::clamp(
+            Settings::Gameplay.defeatPose,
+            static_cast<int>(Settings::DefeatPose::kBleedout),
+            static_cast<int>(Settings::DefeatPose::kPersistentRagdoll));
         Settings::UI.backgroundOpacityPercent = std::clamp(Settings::UI.backgroundOpacityPercent, 0, 100);
         Settings::UI.backgroundBlurPixels = std::clamp(Settings::UI.backgroundBlurPixels, 0, 30);
         Settings::UI.scalePercent = std::clamp(Settings::UI.scalePercent, 50, 200);
@@ -119,6 +128,15 @@ void ModMenu::LoadSettings() {
         const auto& gameplay = document["gameplay"];
         ReadBool(gameplay, "enabled", Settings::Gameplay.enabled);
         ReadBool(gameplay, "pauseGameWhileMenuOpen", Settings::Gameplay.pauseGameWhileMenuOpen);
+        if (gameplay.HasMember("defeatPose") && gameplay["defeatPose"].IsInt()) {
+            Settings::Gameplay.defeatPose = gameplay["defeatPose"].GetInt();
+        } else {
+            bool legacyRagdoll = false;
+            ReadBool(gameplay, "useRagdollInsteadOfBleedout", legacyRagdoll);
+            if (legacyRagdoll) {
+                Settings::Gameplay.defeatPose = static_cast<int>(Settings::DefeatPose::kRagdoll);
+            }
+        }
         ReadInt(gameplay, "healthPercent", Settings::Gameplay.healthPercent);
         ReadInt(gameplay, "magickaPercent", Settings::Gameplay.magickaPercent);
         ReadInt(gameplay, "staminaPercent", Settings::Gameplay.staminaPercent);
@@ -146,6 +164,7 @@ void ModMenu::SaveSettings() {
     rapidjson::Value gameplay(rapidjson::kObjectType);
     gameplay.AddMember("enabled", Settings::Gameplay.enabled, allocator);
     gameplay.AddMember("pauseGameWhileMenuOpen", Settings::Gameplay.pauseGameWhileMenuOpen, allocator);
+    gameplay.AddMember("defeatPose", Settings::Gameplay.defeatPose, allocator);
     gameplay.AddMember("healthPercent", Settings::Gameplay.healthPercent, allocator);
     gameplay.AddMember("magickaPercent", Settings::Gameplay.magickaPercent, allocator);
     gameplay.AddMember("staminaPercent", Settings::Gameplay.staminaPercent, allocator);
@@ -167,6 +186,16 @@ void ModMenu::GameplayRender() {
     changed |= ImGui::Checkbox(
         GetLoc("menu.pause_game", "Pause game while the death menu is open"),
         &Settings::Gameplay.pauseGameWhileMenuOpen);
+    const char* defeatPoses[] = {
+        GetLoc("menu.pose_bleedout", "Bleedout"),
+        GetLoc("menu.pose_ragdoll", "Ragdoll (vanilla get-up)"),
+        GetLoc("menu.pose_persistent_ragdoll", "Persistent ragdoll (Nemesis patch)")
+    };
+    changed |= ImGui::Combo(
+        GetLoc("menu.defeat_pose", "Defeat pose"),
+        &Settings::Gameplay.defeatPose,
+        defeatPoses,
+        static_cast<int>(std::size(defeatPoses)));
 
     ImGui::Separator();
     changed |= RenderIntSliderWithInput(GetLoc("menu.health", "Respawn health (%)"), &Settings::Gameplay.healthPercent, 1, 100);
@@ -201,6 +230,83 @@ void ModMenu::UIRender() {
     }
 }
 
+void ModMenu::DiagnosticsRender() {
+    const auto evaluation = RespawnPolicyManager::Evaluate();
+    const auto sleep = CheckpointManager::GetLastSleepInfo();
+    const auto checkpoint = CheckpointManager::GetCheckpointInfo();
+    const auto policies = RespawnPolicyManager::GetPolicies();
+    const auto overrides = TextManager::GetOverrides();
+    const auto variables = TextManager::GetVariables();
+    const auto lastEvent = IntegrationEvents::GetLastEventDescription();
+
+    ImGui::Text("Available respawns: 0x%02X", evaluation.availableMask);
+    ImGui::Text("Blocked respawns: 0x%02X", evaluation.blockedMask);
+    ImGui::Text("Trick Death disabled here: %s", evaluation.trickDeathDisabled ? "yes" : "no");
+    ImGui::Separator();
+    ImGui::Text(
+        "Last sleep: %s | marker=%08X | cell=%08X | location=%08X",
+        sleep.active ? sleep.name.c_str() : "unavailable",
+        sleep.markerFormID,
+        sleep.cellFormID,
+        sleep.locationFormID);
+    ImGui::Text(
+        "External checkpoint: %s | marker=%08X | owner=%08X | cell=%08X | location=%08X",
+        checkpoint.active ? checkpoint.name.c_str() : "unavailable",
+        checkpoint.markerFormID,
+        checkpoint.ownerFormID,
+        checkpoint.cellFormID,
+        checkpoint.locationFormID);
+    ImGui::Separator();
+    ImGui::Text("Policies: %zu", policies.size());
+    for (std::size_t index = 0; index < policies.size(); ++index) {
+        const auto& policy = policies[index];
+        ImGui::BulletText(
+            "#%zu owner=%08X area=%08X blocked=0x%02X persistent=%s",
+            index + 1,
+            policy.ownerFormID,
+            policy.areaFormID,
+            policy.blockedMask,
+            policy.persistent ? "yes" : "no");
+    }
+    ImGui::Text("Text overrides: %zu | variables: %zu", overrides.size(), variables.size());
+    for (const auto& item : overrides) {
+        ImGui::BulletText(
+            "%s owner=%08X priority=%d persistent=%s",
+            item.slot.c_str(),
+            item.ownerFormID,
+            item.priority,
+            item.persistent ? "yes" : "no");
+    }
+    ImGui::Separator();
+    ImGui::TextWrapped("Last lifecycle event: %s", lastEvent.c_str());
+
+    if (ImGui::Button("Write diagnostic snapshot to log")) {
+        logger::info(
+            "[Diagnostics] available=0x{:X}, blocked=0x{:X}, disabled={}, "
+            "lastSleep={{active={}, marker={:08X}, cell={:08X}, location={:08X}, name='{}'}}, "
+            "checkpoint={{active={}, marker={:08X}, owner={:08X}, cell={:08X}, location={:08X}, name='{}'}}, "
+            "policies={}, overrides={}, variables={}, lastEvent='{}'.",
+            evaluation.availableMask,
+            evaluation.blockedMask,
+            evaluation.trickDeathDisabled,
+            sleep.active,
+            sleep.markerFormID,
+            sleep.cellFormID,
+            sleep.locationFormID,
+            sleep.name,
+            checkpoint.active,
+            checkpoint.markerFormID,
+            checkpoint.ownerFormID,
+            checkpoint.cellFormID,
+            checkpoint.locationFormID,
+            checkpoint.name,
+            policies.size(),
+            overrides.size(),
+            variables.size(),
+            lastEvent);
+    }
+}
+
 void ModMenu::Register() {
     LoadLanguage();
     LoadSettings();
@@ -213,4 +319,6 @@ void ModMenu::Register() {
     SKSEMenuFramework::SetSection(GetLoc("menu.section", "Trick Death"));
     SKSEMenuFramework::AddSectionItem(GetLoc("menu.gameplay", "Gameplay"), GameplayRender);
     SKSEMenuFramework::AddSectionItem(GetLoc("menu.ui", "UI"), UIRender);
+    SKSEMenuFramework::AddSectionItem(GetLoc("menu.diagnostics", "Diagnostics"), DiagnosticsRender);
+    SKSEMenuFramework::AddSectionItem(GetLoc("menu.api_debug", "API Debug"), APIDebugMenu::Render);
 }

@@ -8,7 +8,7 @@ public:
     static bool IsHidden();
     static bool IsReady();
     static bool CanShow();
-    static void ShowDeathMenu(bool checkpointAvailable);
+    static void ShowDeathMenu(std::uint32_t availableRespawns);
     static void ShowError(const char* message);
     static void ApplyUISettings();
 };

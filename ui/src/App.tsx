@@ -1,8 +1,13 @@
 import { onMount, Show, createSignal } from 'solid-js';
 import './app.css';
-import { checkpointAvailable, errorMessage, settings, visible } from './bridge';
+import { availableRespawns, errorMessage, settings, visible } from './bridge';
 
-type DeathAction = 'respawn_checkpoint' | 'respawn_here' | 'load_last_save';
+type DeathAction = 'respawn_checkpoint' | 'respawn_last_sleep' | 'respawn_here' | 'load_last_save';
+
+const RESPAWN_HERE = 1;
+const LAST_SLEEP = 2;
+const LAST_CHECKPOINT = 4;
+const LOAD_LAST_SAVE = 8;
 
 const supportedBackgroundExtensions = ['svg', 'png', 'webp', 'jpg', 'jpeg', 'gif', 'avif'];
 
@@ -63,22 +68,38 @@ function App() {
                     <div class="death-actions">
                         <button
                             class="death-action"
-                            disabled={!checkpointAvailable()}
-                            title={!checkpointAvailable() ? settings().labels.noCheckpoint : ''}
-                            onClick={() => dispatchAction('respawn_checkpoint')}
+                            disabled={(availableRespawns() & RESPAWN_HERE) === 0}
+                            title={(availableRespawns() & RESPAWN_HERE) === 0 ? settings().labels.unavailableHere : ''}
+                            onClick={() => dispatchAction('respawn_here')}
                         >
                             <span class="action-index">I</span>
-                            <span>{settings().labels.checkpoint}</span>
-                        </button>
-                        <Show when={!checkpointAvailable()}>
-                            <p class="checkpoint-warning">{settings().labels.noCheckpoint}</p>
-                        </Show>
-                        <button class="death-action" onClick={() => dispatchAction('respawn_here')}>
-                            <span class="action-index">II</span>
                             <span>{settings().labels.respawn}</span>
                         </button>
-                        <button class="death-action" onClick={() => dispatchAction('load_last_save')}>
+                        <button
+                            class="death-action"
+                            disabled={(availableRespawns() & LAST_SLEEP) === 0}
+                            title={(availableRespawns() & LAST_SLEEP) === 0 ? settings().labels.unavailableLastSleep : ''}
+                            onClick={() => dispatchAction('respawn_last_sleep')}
+                        >
+                            <span class="action-index">II</span>
+                            <span>{settings().labels.lastSleep}</span>
+                        </button>
+                        <button
+                            class="death-action"
+                            disabled={(availableRespawns() & LAST_CHECKPOINT) === 0}
+                            title={(availableRespawns() & LAST_CHECKPOINT) === 0 ? settings().labels.unavailableCheckpoint : ''}
+                            onClick={() => dispatchAction('respawn_checkpoint')}
+                        >
                             <span class="action-index">III</span>
+                            <span>{settings().labels.checkpoint}</span>
+                        </button>
+                        <button
+                            class="death-action"
+                            disabled={(availableRespawns() & LOAD_LAST_SAVE) === 0}
+                            title={(availableRespawns() & LOAD_LAST_SAVE) === 0 ? settings().labels.unavailableLoad : ''}
+                            onClick={() => dispatchAction('load_last_save')}
+                        >
+                            <span class="action-index">IV</span>
                             <span>{settings().labels.load}</span>
                         </button>
                     </div>
