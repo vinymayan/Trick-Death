@@ -1,5 +1,4 @@
 ﻿#include "Hooks.h"
-#include "DelayedDispatcher.h"
 #include "DeathManager.h"
 #include "InputEventHandler.h"
 #include "Prisma.h"
@@ -8,49 +7,19 @@
 #include "RE/A/AIProcess.h"
 
 #include <MinHook.h>
-#include <intrin.h>
 
+#include <cmath>
 #include <limits>
 #include <optional>
 #include <string>
-#include <utility>
 
 namespace {
-    std::uintptr_t ToModuleOffset(void* address) {
-        const auto absolute = reinterpret_cast<std::uintptr_t>(address);
-        const auto base = REL::Module::get().base();
-        return absolute >= base ? absolute - base : absolute;
-    }
-
     struct PlayerKillHook {
         static void Thunk(RE::PlayerCharacter* player, RE::Actor* attacker, float damage, bool sendEvent, bool ragdollInstant) {
-            const auto callerOffset = ToModuleOffset(_ReturnAddress());
-            DeathManager::LogKillHookSnapshot(
-                callerOffset,
-                player,
-                attacker,
-                damage,
-                sendEvent,
-                ragdollInstant);
             if (DeathManager::TryInterceptDeath(player, attacker, ragdollInstant)) {
-                DeathManager::LogLethalHitTraceSnapshot(
-                    "KillHook:intercepted-before-original",
-                    player,
-                    attacker,
-                    damage);
                 return;
             }
-            DeathManager::LogLethalHitTraceSnapshot(
-                "KillHook:forwarding-to-original",
-                player,
-                attacker,
-                damage);
             Function(player, attacker, damage, sendEvent, ragdollInstant);
-            DeathManager::LogLethalHitTraceSnapshot(
-                "KillHook:after-original",
-                player,
-                attacker,
-                damage);
         }
 
         static inline REL::Relocation<decltype(Thunk)> Function;
@@ -63,65 +32,27 @@ namespace {
 
     struct PlayerHealthDamageHook {
         static void Thunk(RE::PlayerCharacter* player, RE::Actor* attacker, float damage) {
-            const auto sequence = damageSequence.fetch_add(1) + 1;
-            const auto callerOffset = ToModuleOffset(_ReturnAddress());
             if (DeathManager::IsDamageBlocked()) {
                 DeathManager::RepairBlockedPlayerHealth(player);
-                DeathManager::LogHealthDamageHookSnapshot(
-                    "blocked-by-death-state",
-                    sequence,
-                    callerOffset,
-                    player,
-                    attacker,
-                    damage,
-                    0.0F);
                 return;
             }
 
             DeathManager::CaptureAppliedPlayerDamage(
-                sequence,
                 player,
-                attacker,
-                damage);
+                attacker);
 
             if (handlingDamage) {
-                DeathManager::LogHealthDamageHookSnapshot(
-                    "reentrant-forward",
-                    sequence,
-                    callerOffset,
-                    player,
-                    attacker,
-                    damage,
-                    damage);
                 Function(player, attacker, damage);
                 return;
             }
 
             handlingDamage = true;
-            float forwardedDamage = damage;
-            DeathManager::LogHealthDamageHookSnapshot(
-                "entry",
-                sequence,
-                callerOffset,
-                player,
-                attacker,
-                damage,
-                forwardedDamage);
-            Function(player, attacker, forwardedDamage);
-            DeathManager::LogHealthDamageHookSnapshot(
-                "after-original-pass-through",
-                sequence,
-                callerOffset,
-                player,
-                attacker,
-                damage,
-                forwardedDamage);
+            Function(player, attacker, damage);
             handlingDamage = false;
         }
 
         static inline REL::Relocation<decltype(Thunk)> Function;
         static inline thread_local bool handlingDamage = false;
-        static inline std::atomic_uint64_t damageSequence{ 0 };
 
         static void Install() {
             REL::Relocation<std::uintptr_t> vtable{ RE::PlayerCharacter::VTABLE[0] };
@@ -143,28 +74,9 @@ namespace {
             auto* player = static_cast<RE::PlayerCharacter*>(actor);
             if (DeathManager::IsDamageBlocked()) {
                 DeathManager::RepairBlockedPlayerHealth(player);
-                logger::info(
-                    "[FallDamageHook] source={} suppressed while defeat is active: "
-                    "fallDistance={}, defaultMultiplier={}, calculatedDamage={}.",
-                    MoveFinish ? "move-finish" : "fall-physics",
-                    fallDistance,
-                    defaultMultiplier,
-                    calculatedDamage);
                 return 0.0F;
             }
-            DeathManager::MarkPlayerFallDamage(
-                fallDistance,
-                calculatedDamage,
-                MoveFinish);
-            logger::info(
-                "[FallDamageHook] source={} fallDistance={}, defaultMultiplier={}, "
-                "calculatedDamage={}, forwardedDamage={}; diagnostic-only pass-through so "
-                "the native lethal pipeline can reach KillImpl.",
-                MoveFinish ? "move-finish" : "fall-physics",
-                fallDistance,
-                defaultMultiplier,
-                calculatedDamage,
-                calculatedDamage);
+            DeathManager::MarkPlayerFallDamage();
             return calculatedDamage;
         }
 
@@ -197,7 +109,6 @@ namespace {
 
         static bool Thunk(RE::Actor* actor, RE::Actor* target, RE::CombatGroup* combatGroup) {
             if (target && target->IsPlayerRef() && DeathManager::IsMenuOpen()) {
-                logger::debug("Blocked a new combat acquisition against the defeated player.");
                 return false;
             }
             return Function(actor, target, combatGroup);
@@ -228,7 +139,7 @@ namespace {
                 return false;
             }
 
-            logger::info("Combat acquisition hook installed for the defeated player test.");
+            logger::info("Combat acquisition hook installed for the defeated player.");
             return true;
         }
     };
@@ -249,7 +160,6 @@ struct ProcessInputQueueHook {
 namespace {
     enum class ManualRagdollTest {
         AddRagdollToWorld,
-        RagdollInstant,
         NativeKnockExplosion,
         ReconcileState
     };
@@ -258,8 +168,6 @@ namespace {
         switch (test) {
         case ManualRagdollTest::AddRagdollToWorld:
             return "AddRagdollToWorld";
-        case ManualRagdollTest::RagdollInstant:
-            return "RagdollInstant";
         case ManualRagdollTest::NativeKnockExplosion:
             return "AIProcessKnockExplosion";
         case ManualRagdollTest::ReconcileState:
@@ -268,78 +176,19 @@ namespace {
         return "unknown";
     }
 
-    void LogManualRagdollAudit(std::string_view test, std::string_view phase, RE::Actor* actor) {
-        if (!actor) {
-            logger::error("[ManualRagdollTest] test={} phase={}: player handle expired.", test, phase);
-            return;
-        }
-
-        const auto actorState = actor->AsActorState();
-        const auto controller = actor->GetCharController();
-        RE::hkVector4 velocity{};
-        if (controller) {
-            controller->GetLinearVelocityImpl(velocity);
-        }
-        logger::info(
-            "[ManualRagdollTest] test={} phase={} position=({:.3f},{:.3f},{:.3f}) "
-            "velocity=({:.3f},{:.3f},{:.3f}) lifeState={} knockState={} nativeRagdoll={} "
-            "controllerPresent={} controllerInWorld={}.",
-            test,
-            phase,
-            actor->GetPositionX(),
-            actor->GetPositionY(),
-            actor->GetPositionZ(),
-            velocity.quad.m128_f32[0],
-            velocity.quad.m128_f32[1],
-            velocity.quad.m128_f32[2],
-            static_cast<int>(actor->GetLifeState()),
-            actorState ? static_cast<int>(actorState->GetKnockState()) : -1,
-            actor->IsInRagdollState(),
-            controller != nullptr,
-            controller && controller->GetHavokWorld());
-    }
-
-    bool AddPlayerRagdollsToWorld(RE::PlayerCharacter* player, std::string_view test) {
+    void AddPlayerRagdollsToWorld(RE::PlayerCharacter* player, std::string_view test) {
         RE::BSTSmartPointer<RE::BSAnimationGraphManager> manager;
         if (!player->GetAnimationGraphManager(manager) || !manager) {
             logger::error("[ManualRagdollTest] test={}: no animation graph manager.", test);
-            return false;
+            return;
         }
 
-        bool calledAnyGraph = false;
         for (std::uint32_t index = 0; index < manager->graphs.size(); ++index) {
             const auto& graph = manager->graphs[index];
             if (!graph) {
-                logger::info("[ManualRagdollTest] test={} graph={} is unavailable.", test, index);
                 continue;
             }
-
-            const bool hadRagdoll = graph->HasRagdoll();
-            const bool added = graph->AddRagdollToWorld();
-            calledAnyGraph = true;
-            logger::info(
-                "[ManualRagdollTest] test={} graph={} HasRagdollBefore={} AddRagdollToWorldReturned={}.",
-                test,
-                index,
-                hadRagdoll,
-                added);
-        }
-        return calledAnyGraph;
-    }
-
-    void ScheduleManualRagdollAudits(RE::ActorHandle handle, std::string test) {
-        for (const auto [delay, phase] : {
-                 std::pair{ std::chrono::milliseconds(16), std::string("16ms") },
-                 std::pair{ std::chrono::milliseconds(50), std::string("50ms") },
-                 std::pair{ std::chrono::milliseconds(100), std::string("100ms") },
-                 std::pair{ std::chrono::milliseconds(250), std::string("250ms") },
-                 std::pair{ std::chrono::milliseconds(500), std::string("500ms") },
-                 std::pair{ std::chrono::milliseconds(1000), std::string("1000ms") } }) {
-            Utils::DelayedDispatcher::Get().PostDelayed(delay, [handle, test, phase] {
-                SKSE::GetTaskInterface()->AddTask([handle, test, phase] {
-                    LogManualRagdollAudit(test, phase, handle.get().get());
-                    });
-                });
+            graph->AddRagdollToWorld();
         }
     }
 
@@ -368,18 +217,11 @@ namespace {
                 return;
             }
 
-            LogManualRagdollAudit(testName, "before", player);
             switch (test) {
             case ManualRagdollTest::AddRagdollToWorld:
                 // This is the native graph operation ultimately requested by Papyrus'
                 // ForceAddRagdollToWorld. It can only insert a ragdoll that already exists.
                 AddPlayerRagdollsToWorld(player, testName);
-                break;
-            case ManualRagdollTest::RagdollInstant:
-                logger::info(
-                    "[ManualRagdollTest] test={}: NotifyAnimationGraph(RagdollInstant) returned {}.",
-                    testName,
-                    player->NotifyAnimationGraph("RagdollInstant"));
                 break;
             case ManualRagdollTest::NativeKnockExplosion: {
                 auto* process = player->GetActorRuntimeData().currentProcess;
@@ -398,34 +240,90 @@ namespace {
 
                 const auto location = player->GetPosition();
                 constexpr float magnitude = std::numeric_limits<float>::min();
-                logger::info(
-                    "[ManualRagdollTest] test={}: calling AIProcess::KnockExplosion "
-                    "at ({:.3f},{:.3f},{:.3f}) magnitude={:.9e}.",
-                    testName,
-                    location.x,
-                    location.y,
-                    location.z,
-                    magnitude);
                 process->KnockExplosion(player, location, magnitude);
                 break;
             }
             case ManualRagdollTest::ReconcileState:
                 player->PotentiallyFixRagdollState();
-                logger::info("[ManualRagdollTest] test={}: called PotentiallyFixRagdollState.", testName);
                 break;
             }
+            });
+    }
 
-            LogManualRagdollAudit(testName, "immediate", player);
-            ScheduleManualRagdollAudits(player->GetHandle(), testName);
+    void RunManualTeleportBehindTargetTest() {
+        SKSE::GetTaskInterface()->AddTask([] {
+            auto* player = RE::PlayerCharacter::GetSingleton();
+            if (!player || !player->Is3DLoaded()) {
+                logger::error("[ManualTeleportTest] player or 3D is unavailable.");
+                return;
+            }
+            if (DeathManager::IsMenuOpen()) {
+                logger::warn("[ManualTeleportTest] rejected while the defeat UI is open.");
+                return;
+            }
+            if (player->IsInRagdollState()) {
+                logger::warn("[ManualTeleportTest] rejected while the player is in ragdoll.");
+                return;
+            }
+
+            const auto controller = player->GetCharController();
+            if (!controller || !controller->GetHavokWorld()) {
+                logger::warn(
+                    "[ManualTeleportTest] rejected: character controller is not in the Havok world.");
+                return;
+            }
+
+            const auto* crosshair = RE::CrosshairPickData::GetSingleton();
+            const auto targetReference = crosshair ? crosshair->GetActiveTarget().get() : nullptr;
+            auto* target = targetReference ? targetReference->As<RE::Actor>() : nullptr;
+            if (!target || target == player) {
+                logger::warn("[ManualTeleportTest] rejected: crosshair is not pointing at another actor.");
+                return;
+            }
+            if (!target->Is3DLoaded() || target->IsDead()) {
+                logger::warn(
+                    "[ManualTeleportTest] rejected: target {:08X} is dead or its 3D is unavailable.",
+                    target->GetFormID());
+                return;
+            }
+            if (target->GetParentCell() != player->GetParentCell()) {
+                logger::warn(
+                    "[ManualTeleportTest] rejected: target {:08X} is not in the player's current cell.",
+                    target->GetFormID());
+                return;
+            }
+
+            const bool targetHostileToPlayer = target->IsHostileToActor(player);
+            const bool playerHostileToTarget = player->IsHostileToActor(target);
+            if (!targetHostileToPlayer && !playerHostileToTarget) {
+                logger::warn(
+                    "[ManualTeleportTest] rejected: aimed actor {:08X} ({}) is not hostile.",
+                    target->GetFormID(),
+                    target->GetName());
+                return;
+            }
+
+            constexpr float kDistanceBehind = 80.0F;
+            const auto targetPosition = target->GetPosition();
+            const float targetHeading = target->GetAngleZ();
+            const RE::NiPoint3 targetForward{
+                std::sin(targetHeading),
+                std::cos(targetHeading),
+                0.0F
+            };
+            RE::NiPoint3 destination = targetPosition - targetForward * kDistanceBehind;
+            destination.z = targetPosition.z;
+
+            player->SetPosition(destination, true);
+            player->SetHeading(targetHeading);
             });
     }
 
     std::optional<ManualRagdollTest> GetManualRagdollTest(std::uint32_t keyCode) {
         using Keys = RE::BSWin32KeyboardDevice::Keys;
         if (keyCode == Keys::kNum5 || keyCode == Keys::kKP_5) return ManualRagdollTest::AddRagdollToWorld;
-        if (keyCode == Keys::kNum6 || keyCode == Keys::kKP_6) return ManualRagdollTest::RagdollInstant;
         if (keyCode == Keys::kNum7 || keyCode == Keys::kKP_7) return ManualRagdollTest::NativeKnockExplosion;
-        if (keyCode == Keys::kNum8 || keyCode == Keys::kKP_8) return ManualRagdollTest::ReconcileState;
+        if (keyCode == Keys::kNum9 || keyCode == Keys::kKP_9) return ManualRagdollTest::ReconcileState;
         return std::nullopt;
     }
 }
@@ -437,8 +335,12 @@ bool OnInput(RE::InputEvent* event) {
     if (!button) return false;
     if (!button->IsDown()) return false;
     const auto keyCode = button->GetIDCode();
+    using Keys = RE::BSWin32KeyboardDevice::Keys;
+    if (keyCode == Keys::kNum8 || keyCode == Keys::kKP_8) {
+        RunManualTeleportBehindTargetTest();
+        return true;
+    }
     if (const auto test = GetManualRagdollTest(keyCode)) {
-        logger::info("[ManualRagdollTest] key={} requested test={}", keyCode, ToString(*test));
         RunManualRagdollTest(*test);
         return true;
     }
@@ -464,7 +366,7 @@ void Hooks::Install() {
     PlayerHealthDamageHook::Install();
     FallPhysicsDamageHook::Install();
     StartCombatHook::Install();
-    ProcessInputQueueHook::install();
-    InputEventHandler::Register(OnInput);
-    logger::info("Death and input hooks installed. Combat groups are not accessed or modified.");
+    //ProcessInputQueueHook::install();
+    //InputEventHandler::Register(OnInput);
+    logger::info("Death and input hooks installed");
 }

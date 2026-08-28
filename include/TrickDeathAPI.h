@@ -14,7 +14,8 @@ namespace TRICK_DEATH_API {
         kRespawnHere = 1U << 0,
         kLastSleep = 1U << 1,
         kLastCheckpoint = 1U << 2,
-        kLoadLastSave = 1U << 3,
+        kReloadSave = 1U << 3,
+        kLoadLastSave = kReloadSave,  // compatibility alias; the action now reloads the current save
         kDisableTrickDeath = 1U << 4
     };
 

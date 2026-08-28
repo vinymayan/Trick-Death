@@ -1,0 +1,20 @@
+{
+  "death_messages": {
+    "generic": [
+      "The journey of {$player.name} has ended.",
+      "Defeat found {$player.name} at {$death.location}."
+    ],
+    "fall": [
+      "The ground claimed {$player.name}.",
+      "The fall at {$death.location} proved fatal."
+    ],
+    "sword": [
+      "{$killer.name} cut short the journey of {$player.name}.",
+      "The blade {$death.weapon} decided the battle."
+    ],
+    "magic": [
+      "Magic consumed {$player.name}.",
+      "{$death.magic} brought defeat at {$death.location}."
+    ]
+  }
+}

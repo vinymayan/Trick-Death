@@ -1,6 +1,7 @@
 #include "RespawnPolicyManager.h"
 
 #include "CheckpointManager.h"
+#include "CurrentSaveManager.h"
 
 #include <algorithm>
 #include <mutex>
@@ -91,12 +92,6 @@ bool RespawnPolicyManager::SetPolicy(
     } else {
         *it = updated;
     }
-    logger::info(
-        "Respawn policy set: owner={:08X}, area={:08X}, blocked=0x{:X}, persistent={}.",
-        ownerID,
-        areaID,
-        blockedMask,
-        persistent);
     return true;
 }
 
@@ -140,6 +135,7 @@ RespawnPolicyManager::Evaluation RespawnPolicyManager::Evaluate() {
     const auto currentLocationID = currentLocation ? currentLocation->GetFormID() : 0;
     const auto sleep = CheckpointManager::GetLastSleepInfo();
     const auto checkpoint = CheckpointManager::GetCheckpointInfo();
+    const auto checkpointRestrictions = checkpoint.active ? checkpoint.blockedRespawns : 0;
 
     result.trickDeathDisabled = IsBlocked(
         snapshot,
@@ -151,14 +147,18 @@ RespawnPolicyManager::Evaluation RespawnPolicyManager::Evaluate() {
         snapshot,
         Respawn::Option::Here,
         currentCellID,
-        currentLocationID);
+        currentLocationID) ||
+        Respawn::Contains(checkpointRestrictions, Respawn::Option::Here);
     const bool sleepBlocked = !sleep.active ||
+        Respawn::Contains(checkpointRestrictions, Respawn::Option::LastSleep) ||
         Respawn::Contains(sleep.blockedRespawns, Respawn::Option::LastSleep) ||
         IsBlocked(snapshot, Respawn::Option::LastSleep, sleep.cellFormID, sleep.locationFormID);
     const bool checkpointBlocked = !checkpoint.active ||
-        Respawn::Contains(checkpoint.blockedRespawns, Respawn::Option::LastCheckpoint) ||
+        Respawn::Contains(checkpointRestrictions, Respawn::Option::LastCheckpoint) ||
         IsBlocked(snapshot, Respawn::Option::LastCheckpoint, checkpoint.cellFormID, checkpoint.locationFormID);
-    const bool loadBlocked = IsBlocked(snapshot, Respawn::Option::LoadLastSave, 0, 0, true);
+    const bool reloadBlocked = !CurrentSaveManager::HasCurrentSave() ||
+        Respawn::Contains(checkpointRestrictions, Respawn::Option::ReloadSave) ||
+        IsBlocked(snapshot, Respawn::Option::ReloadSave, 0, 0, true);
 
     const auto setAvailability = [&](Respawn::Option option, bool blocked) {
         if (blocked) {
@@ -170,7 +170,7 @@ RespawnPolicyManager::Evaluation RespawnPolicyManager::Evaluate() {
     setAvailability(Respawn::Option::Here, hereBlocked);
     setAvailability(Respawn::Option::LastSleep, sleepBlocked);
     setAvailability(Respawn::Option::LastCheckpoint, checkpointBlocked);
-    setAvailability(Respawn::Option::LoadLastSave, loadBlocked);
+    setAvailability(Respawn::Option::ReloadSave, reloadBlocked);
     if (result.trickDeathDisabled) {
         result.blockedMask |= Respawn::ToMask(Respawn::Option::DisableTrickDeath);
         result.availableMask = 0;

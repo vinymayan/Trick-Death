@@ -57,7 +57,6 @@ namespace {
             data.markerFormID,
             data.ownerFormID,
             text);
-        logger::info("Integration event: {}", lastEventDescription);
     }
 
     IntegrationEvents::EventData MakeEvent(

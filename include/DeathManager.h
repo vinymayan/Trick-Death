@@ -1,37 +1,26 @@
 #pragma once
 
+#include <cstdint>
+#include <string>
 #include <string_view>
 
 namespace DeathManager {
-    void LogHealthDamageHookSnapshot(
-        std::string_view phase,
-        std::uint64_t damageSequence,
-        std::uintptr_t callerOffset,
-        RE::PlayerCharacter* player,
-        RE::Actor* attacker,
-        float rawDamage,
-        float forwardedDamage);
-    void LogKillHookSnapshot(
-        std::uintptr_t callerOffset,
-        RE::PlayerCharacter* player,
-        RE::Actor* attacker,
-        float damage,
-        bool sendEvent,
-        bool ragdollInstantRequested);
-    void LogLethalHitTraceSnapshot(
-        std::string_view phase,
-        RE::PlayerCharacter* player,
-        RE::Actor* attacker,
-        float damage);
+    struct DebugInfo {
+        bool damageProtectionActive{ false };
+        bool ghostCaptured{ false };
+        bool playerWasGhost{ false };
+        float protectedHealth{ 0.0F };
+        std::int64_t protectionRemainingMilliseconds{ 0 };
+        std::string state;
+        std::string physicalCause;
+        std::string presentationCause;
+        std::string backgroundTemplate;
+    };
+
     void CaptureAppliedPlayerDamage(
-        std::uint64_t damageSequence,
         RE::PlayerCharacter* player,
-        RE::Actor* attacker,
-        float rawDamage);
-    void MarkPlayerFallDamage(
-        float fallDistance,
-        float calculatedDamage,
-        bool moveFinishSource);
+        RE::Actor* attacker);
+    void MarkPlayerFallDamage();
     void HandlePlayerHitEvent(const RE::TESHitEvent& event);
     bool TryInterceptDeath(
         RE::PlayerCharacter* player,
@@ -44,6 +33,10 @@ namespace DeathManager {
     void RepairBlockedPlayerHealth(RE::PlayerCharacter* player);
     bool IsDamageBlocked();
     bool IsMenuOpen();
+    std::string GetBackgroundText();
+    DebugInfo GetDebugInfo();
+    bool DebugSelectDeathTextCause(std::string_view cause);
     void HandleUIAction(std::string_view action);
+    void OnGameLoadFinished(bool success);
     void Reset();
 }

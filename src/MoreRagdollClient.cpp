@@ -9,7 +9,7 @@ namespace {
     std::atomic_bool resolutionAttempted{ false };
 
     MoreRagdollAPI::Interface* GetAPI() {
-        if (!resolutionAttempted.load()) {
+        if (!moreRagdollAPI.load()) {
             MoreRagdollClient::Install();
         }
         return moreRagdollAPI.load();
@@ -17,14 +17,19 @@ namespace {
 }
 
 void MoreRagdollClient::Install() {
-    if (resolutionAttempted.exchange(true)) {
+    if (moreRagdollAPI.load()) {
         return;
     }
 
+    const bool firstAttempt = !resolutionAttempted.exchange(true);
+
     const auto module = GetModuleHandleW(L"MoreRagdoll.dll");
     if (!module) {
-        logger::info(
-            "More Ragdoll DLL was not found; persistent ragdoll requests will use animation events.");
+        if (firstAttempt) {
+            logger::info(
+                "More Ragdoll DLL was not found yet; ragdoll requests will use "
+                "animation events and retry API discovery when needed.");
+        }
         return;
     }
 
@@ -43,9 +48,9 @@ void MoreRagdollClient::Install() {
     }
 
     const auto version = api->GetVersion();
-    if (version < MoreRagdollAPI::API_VERSION) {
+    if (version != MoreRagdollAPI::API_VERSION) {
         logger::warn(
-            "More Ragdoll API version {} is older than required version {}; "
+            "More Ragdoll API version {} does not match required version {}; "
             "falling back to animation events.",
             version,
             MoreRagdollAPI::API_VERSION);
@@ -64,19 +69,26 @@ MoreRagdollClient::RequestResult MoreRagdollClient::Enable(
         return {};
     }
 
+    const auto actorFormID = actor->GetFormID();
+    if (actorFormID == 0) {
+        return {};
+    }
+
     if (auto* api = GetAPI()) {
         const bool accepted = adoptOnly ?
-            api->Adopt(actor, safetyTimeoutSeconds) :
-            api->Enable(actor, safetyTimeoutSeconds);
+            api->Adopt(actorFormID, safetyTimeoutSeconds) :
+            api->StartRagdoll(actorFormID, safetyTimeoutSeconds, true);
         if (accepted) {
             return { true, Route::API };
         }
         logger::warn(
             "More Ragdoll API rejected the {} request for {:08X}; trying the animation event fallback.",
-            adoptOnly ? "adopt" : "enable",
-            actor->GetFormID());
+            adoptOnly ? "adopt" : "start ragdoll",
+            actorFormID);
     }
 
+    // These legacy commands are understood by both the current provider and
+    // older More Ragdoll builds when the C++ ABI cannot be used.
     const auto eventName = adoptOnly ? "MoreRagdollAdopt" : "MoreRagdollEnable";
     return { actor->NotifyAnimationGraph(eventName), Route::AnimationEvent };
 }
@@ -86,14 +98,19 @@ MoreRagdollClient::RequestResult MoreRagdollClient::Disable(RE::Actor* actor) {
         return {};
     }
 
+    const auto actorFormID = actor->GetFormID();
+    if (actorFormID == 0) {
+        return {};
+    }
+
     if (auto* api = GetAPI()) {
-        if (api->Disable(actor)) {
+        if (api->Disable(actorFormID)) {
             return { true, Route::API };
         }
         logger::warn(
             "More Ragdoll API rejected the disable request for {:08X}; "
             "trying the animation event fallback.",
-            actor->GetFormID());
+            actorFormID);
     }
 
     return { actor->NotifyAnimationGraph("MoreRagdollDisable"), Route::AnimationEvent };

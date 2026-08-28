@@ -23,7 +23,7 @@ add_include_folder(vendor/include)
 
 cmake_minimum_required(VERSION 3.21)
 set(AUTHOR_NAME "Viny")
-set(PRODUCT_NAME "DeathTrick")
+set(PRODUCT_NAME "TrickDeath")
 set(BEAUTIFUL_NAME "Trick Death")
 
 project(${PRODUCT_NAME} VERSION 3.0.0.0 LANGUAGES CXX)

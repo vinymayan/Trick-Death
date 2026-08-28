@@ -1,8 +1,10 @@
 ﻿#include "DeathManager.h"
 
 #include "CheckpointManager.h"
+#include "CurrentSaveManager.h"
 #include "Configuration.h"
 #include "DelayedDispatcher.h"
+#include "DeathTrackerManager.h"
 #include "IntegrationEvents.h"
 #include "MoreRagdollClient.h"
 #include "Prisma.h"
@@ -13,9 +15,7 @@
 #include <atomic>
 #include <algorithm>
 #include <chrono>
-#include <cctype>
 #include <cmath>
-#include <deque>
 #include <mutex>
 
 namespace {
@@ -36,11 +36,17 @@ namespace {
         LethalFall
     };
 
+    enum class DeathTextCause : std::uint8_t {
+        Generic,
+        Fall,
+        Sword,
+        Magic
+    };
+
     enum class DefeatRecoveryMode : std::uint8_t {
         None,
         Bleedout,
-        VanillaRagdoll,
-        MoreRagdoll
+        Ragdoll
     };
 
     enum class AppliedDamageOrigin : std::uint8_t {
@@ -55,32 +61,27 @@ namespace {
         std::uint64_t serial{ 0 };
         RE::FormID attacker{ 0 };
         RE::FormID source{ 0 };
-        RE::FormID projectile{ 0 };
         RE::FormType sourceType{ RE::FormType::None };
-        std::uint8_t flags{ 0 };
         bool projectileImpact{ false };
     };
 
     struct FallDamageContext {
         bool valid{ false };
         std::uint64_t serial{ 0 };
-        float fallDistance{ 0.0F };
-        float calculatedDamage{ 0.0F };
-        bool moveFinishSource{ false };
     };
 
     struct LethalDamageContext {
         bool valid{ false };
-        std::uint64_t damageSequence{ 0 };
         AppliedDamageOrigin origin{ AppliedDamageOrigin::None };
         RE::FormID attacker{ 0 };
         RE::FormID source{ 0 };
-        RE::FormID projectile{ 0 };
         RE::FormType sourceType{ RE::FormType::None };
-        std::uint8_t hitFlags{ 0 };
     };
 
     std::atomic state{ DeathState::Alive };
+    std::atomic_bool damageProtectionActive{ false };
+    std::atomic<float> protectedHealth{ 1.0F };
+    std::atomic_int64_t damageProtectionDeadlineMilliseconds{ 0 };
     std::uint32_t savedEnabledControls = 0;
     std::uint32_t savedStoredControls = 0;
     bool controlsCaptured = false;
@@ -97,19 +98,12 @@ namespace {
     std::atomic_bool adoptPendingNativeRagdoll{ false };
     std::atomic_uint32_t activeRespawnMask{ 0 };
     std::atomic<Respawn::Option> activeRespawnOption{ Respawn::Option::None };
-    std::atomic_bool fallSequenceActive{ false };
-    std::atomic_int64_t lastFallEventMilliseconds{ 0 };
-    std::atomic_int64_t lastLandingEventMilliseconds{ 0 };
-    std::atomic_uint64_t fallGeneration{ 0 };
-    std::atomic_uint64_t diagnosticEventSequence{ 0 };
-    std::atomic_int64_t lastDiagnosticAnimationMilliseconds{ 0 };
-    std::atomic_uint64_t lethalHitTraceCounter{ 0 };
-    std::atomic_uint64_t activeLethalHitTrace{ 0 };
-    std::atomic_uint64_t lethalHitTraceLogSequence{ 0 };
-    std::atomic_int64_t lethalHitTraceStartMilliseconds{ 0 };
-    std::atomic_int64_t lethalHitTraceDeadlineMilliseconds{ 0 };
-    std::atomic_int64_t lastLethalHitTraceAnimationMilliseconds{ 0 };
     RE::ActorHandle killMoveAttacker;
+
+    std::atomic activeDeathTextCause{ DeathTextCause::Generic };
+    std::mutex presentationLock;
+    std::string activeBackgroundTemplate;
+    std::string activeDeathSourceName;
 
     std::mutex damageContextLock;
     std::uint64_t nextDamageContextSerial{ 0 };
@@ -117,21 +111,7 @@ namespace {
     FallDamageContext pendingFallDamage;
     LethalDamageContext pendingLethalDamage;
 
-    struct BufferedAnimationEvent {
-        std::int64_t milliseconds;
-        std::uintptr_t graphSource;
-        std::string eventName;
-        std::string payload;
-    };
-
-    std::mutex animationPreRollLock;
-    std::deque<BufferedAnimationEvent> animationPreRoll;
-
     void FinishRecoveryLater();
-
-    constexpr std::int64_t LETHAL_HIT_TRACE_WINDOW_MILLISECONDS = 8000;
-    constexpr std::int64_t ANIMATION_PRE_ROLL_MILLISECONDS = 2000;
-    constexpr std::size_t MAX_ANIMATION_PRE_ROLL_EVENTS = 256;
 
     std::int64_t GetSteadyMilliseconds() {
         return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -173,32 +153,18 @@ namespace {
         return "Unknown";
     }
 
-    const char* ToString(DefeatRecoveryMode value) {
+    const char* ToString(DeathTextCause value) {
         switch (value) {
-        case DefeatRecoveryMode::None:
-            return "None";
-        case DefeatRecoveryMode::Bleedout:
-            return "Bleedout";
-        case DefeatRecoveryMode::VanillaRagdoll:
-            return "VanillaRagdoll";
-        case DefeatRecoveryMode::MoreRagdoll:
-            return "MoreRagdoll";
+        case DeathTextCause::Generic:
+            return "generic";
+        case DeathTextCause::Fall:
+            return "fall";
+        case DeathTextCause::Sword:
+            return "sword";
+        case DeathTextCause::Magic:
+            return "magic";
         }
-        return "Unknown";
-    }
-
-    const char* ToString(AppliedDamageOrigin value) {
-        switch (value) {
-        case AppliedDamageOrigin::None:
-            return "None";
-        case AppliedDamageOrigin::StandardHit:
-            return "StandardHit";
-        case AppliedDamageOrigin::ProjectileImpact:
-            return "ProjectileImpact";
-        case AppliedDamageOrigin::FallPhysics:
-            return "FallPhysics";
-        }
-        return "Unknown";
+        return "generic";
     }
 
     bool IsProjectileFormType(RE::FormType formType) {
@@ -245,9 +211,7 @@ namespace {
                     AppliedDamageOrigin::ProjectileImpact : AppliedDamageOrigin::StandardHit;
                 context.attacker = pendingPlayerHit.attacker;
                 context.source = pendingPlayerHit.source;
-                context.projectile = pendingPlayerHit.projectile;
                 context.sourceType = pendingPlayerHit.sourceType;
-                context.hitFlags = pendingPlayerHit.flags;
             } else if (pendingFallDamage.valid && !attacker) {
                 context.valid = true;
                 context.origin = AppliedDamageOrigin::FallPhysics;
@@ -260,29 +224,78 @@ namespace {
         return context;
     }
 
-    std::string NormalizeAnimationEvent(std::string_view eventName) {
-        std::string normalized(eventName);
-        std::ranges::transform(normalized, normalized.begin(), [](unsigned char character) {
-            return static_cast<char>(std::tolower(character));
-        });
-        return normalized;
+    bool IsMagicSourceType(RE::FormType type) {
+        return type == RE::FormType::MagicEffect ||
+            type == RE::FormType::Spell ||
+            type == RE::FormType::Scroll ||
+            type == RE::FormType::Enchantment;
     }
 
-    bool IsDiagnosticAnimationEvent(std::string_view normalizedEvent) {
-        constexpr std::array tokens{
-            "jump",
-            "fall",
-            "land",
-            "ragdoll",
-            "getup",
-            "charactercontroller",
-            "killmove",
-            "paired",
-            "bleedout"
-        };
-        return std::ranges::any_of(tokens, [normalizedEvent](std::string_view token) {
-            return normalizedEvent.contains(token);
-        });
+    struct DeathPresentation {
+        DeathTextCause cause{ DeathTextCause::Generic };
+        std::string sourceName;
+    };
+
+    DeathPresentation ClassifyDeathPresentation(const LethalDamageContext& damage) {
+        DeathPresentation result;
+        if (damage.origin == AppliedDamageOrigin::FallPhysics) {
+            result.cause = DeathTextCause::Fall;
+            return result;
+        }
+
+        auto* source = damage.source ? RE::TESForm::LookupByID(damage.source) : nullptr;
+        if (source) {
+            if (const auto name = source->GetName(); name && name[0] != '\0') {
+                result.sourceName = name;
+            }
+            if (auto* weapon = source->As<RE::TESObjectWEAP>()) {
+                const auto weaponType = weapon->GetWeaponType();
+                if (weaponType == RE::WEAPON_TYPE::kOneHandSword ||
+                    weaponType == RE::WEAPON_TYPE::kTwoHandSword) {
+                    result.cause = DeathTextCause::Sword;
+                    return result;
+                }
+                if (weaponType == RE::WEAPON_TYPE::kStaff) {
+                    result.cause = DeathTextCause::Magic;
+                    return result;
+                }
+            }
+        }
+        if (IsMagicSourceType(damage.sourceType) ||
+            (source && IsMagicSourceType(source->GetFormType()))) {
+            result.cause = DeathTextCause::Magic;
+        }
+        return result;
+    }
+
+    void SelectBackgroundTemplate(DeathTextCause cause) {
+        auto candidates = ModMenu::GetLocList(fmt::format("death_messages.{}", ToString(cause)));
+        if (candidates.empty() && cause != DeathTextCause::Generic) {
+            candidates = ModMenu::GetLocList("death_messages.generic");
+        }
+        std::string selected;
+        if (!candidates.empty()) {
+            selected = candidates[defeatGeneration.load() % candidates.size()];
+        }
+        std::scoped_lock lock(presentationLock);
+        activeBackgroundTemplate = std::move(selected);
+    }
+
+    void ApplyDeathPresentationContext(const DeathPresentation& presentation) {
+        activeDeathTextCause.store(presentation.cause);
+        {
+            std::scoped_lock lock(presentationLock);
+            activeDeathSourceName = presentation.sourceName;
+        }
+        TextManager::SetRuntimeVariable("death.cause", ToString(presentation.cause));
+        TextManager::SetRuntimeVariable(
+            "death.weapon",
+            presentation.cause == DeathTextCause::Sword ? presentation.sourceName : "");
+        TextManager::SetRuntimeVariable(
+            "death.magic",
+            presentation.cause == DeathTextCause::Magic ? presentation.sourceName : "");
+        TextManager::SetRuntimeVariable("death.count", std::to_string(DeathTrackerManager::GetCount()));
+        SelectBackgroundTemplate(presentation.cause);
     }
 
     using SetGhost_t = void (*)(RE::Actor*, bool);
@@ -361,6 +374,26 @@ namespace {
         playerWasGhost = false;
     }
 
+    void BeginDamageProtection(RE::PlayerCharacter* player, bool applyGhost) {
+        damageProtectionActive.store(true);
+        damageProtectionDeadlineMilliseconds.store(0);
+        if (player) {
+            if (auto* owner = player->AsActorValueOwner()) {
+                protectedHealth.store(std::max(1.0F, owner->GetActorValue(RE::ActorValue::kHealth)));
+            }
+            if (applyGhost) {
+                ApplyTemporaryGhost(player);
+            }
+        }
+    }
+
+    void EndDamageProtection(RE::PlayerCharacter* player, std::string_view) {
+        RestoreTemporaryGhost(player);
+        damageProtectionDeadlineMilliseconds.store(0);
+        damageProtectionActive.store(false);
+        protectedHealth.store(1.0F);
+    }
+
     bool IsPlayerKillMoveActive(RE::PlayerCharacter* player) {
         if (player && player->IsInKillMove()) {
             return true;
@@ -395,237 +428,21 @@ namespace {
         }
     }
 
-    bool IsLethalHitTraceActive(std::int64_t now = GetSteadyMilliseconds()) {
-        return activeLethalHitTrace.load() != 0 &&
-               now <= lethalHitTraceDeadlineMilliseconds.load();
-    }
-
-    std::int64_t GetLethalHitTraceElapsed(std::int64_t now = GetSteadyMilliseconds()) {
-        const auto started = lethalHitTraceStartMilliseconds.load();
-        return started > 0 ? now - started : -1;
-    }
-
-    void BufferAnimationEvent(
-        std::int64_t now,
-        std::uintptr_t graphSource,
-        std::string_view eventName,
-        std::string_view payload) {
-        std::scoped_lock lock(animationPreRollLock);
-        animationPreRoll.push_back(BufferedAnimationEvent{
-            now,
-            graphSource,
-            std::string(eventName),
-            std::string(payload)
-        });
-        while (!animationPreRoll.empty() &&
-               (now - animationPreRoll.front().milliseconds > ANIMATION_PRE_ROLL_MILLISECONDS ||
-                animationPreRoll.size() > MAX_ANIMATION_PRE_ROLL_EVENTS)) {
-            animationPreRoll.pop_front();
-        }
-    }
-
-    void DumpAnimationPreRoll(std::uint64_t traceId, std::int64_t traceStarted) {
-        std::deque<BufferedAnimationEvent> copy;
-        {
-            std::scoped_lock lock(animationPreRollLock);
-            copy = animationPreRoll;
-        }
-        logger::info(
-            "[LethalTrace][PreRoll] traceId={} bufferedEvents={} windowMs={}.",
-            traceId,
-            copy.size(),
-            ANIMATION_PRE_ROLL_MILLISECONDS);
-        for (const auto& event : copy) {
-            logger::info(
-                "[LethalTrace][PreRoll] traceId={} t={}ms graphSource=0x{:X} "
-                "event='{}' payload='{}'.",
-                traceId,
-                event.milliseconds - traceStarted,
-                event.graphSource,
-                event.eventName,
-                event.payload);
-        }
-    }
-
-    std::uint64_t BeginOrExtendLethalHitTrace(
-        RE::PlayerCharacter* player,
-        RE::Actor* attacker,
-        std::string_view trigger) {
-        const auto now = GetSteadyMilliseconds();
-        std::uint64_t traceId = activeLethalHitTrace.load();
-        if (!IsLethalHitTraceActive(now)) {
-            traceId = lethalHitTraceCounter.fetch_add(1) + 1;
-            lethalHitTraceStartMilliseconds.store(now);
-            lethalHitTraceLogSequence.store(0);
-            lastLethalHitTraceAnimationMilliseconds.store(0);
-            activeLethalHitTrace.store(traceId);
-            logger::info(
-                "[LethalTrace][BEGIN] traceId={} trigger={} player={} attacker={} "
-                "diagnosticCaptureDurationMs={}; every player animation event will be recorded.",
-                traceId,
-                trigger,
-                player ? fmt::format("{:08X}", player->GetFormID()) : std::string("none"),
-                attacker ? fmt::format("{:08X}", attacker->GetFormID()) : std::string("none"),
-                LETHAL_HIT_TRACE_WINDOW_MILLISECONDS);
-            DumpAnimationPreRoll(traceId, now);
-        }
-        lethalHitTraceDeadlineMilliseconds.store(now + LETHAL_HIT_TRACE_WINDOW_MILLISECONDS);
-        return traceId;
-    }
-
-    int ReadGraphBool(RE::Actor* actor, const char* name) {
-        bool value = false;
-        return actor && actor->GetGraphVariableBool(name, value) ? (value ? 1 : 0) : -1;
-    }
-
-    int ReadGraphInt(RE::Actor* actor, const char* name) {
-        int value = 0;
-        return actor && actor->GetGraphVariableInt(name, value) ? value : -1;
-    }
-
-    float ReadGraphFloat(RE::Actor* actor, const char* name) {
-        float value = 0.0F;
-        return actor && actor->GetGraphVariableFloat(name, value) ? value : -99999.0F;
-    }
-
-    void LogLethalHitTraceState(
-        std::string_view phase,
-        RE::PlayerCharacter* player,
-        RE::Actor* attacker,
-        float damage) {
-        const auto now = GetSteadyMilliseconds();
-        if (!IsLethalHitTraceActive(now)) {
-            return;
-        }
-
-        const auto traceId = activeLethalHitTrace.load();
-        const auto traceSequence = lethalHitTraceLogSequence.fetch_add(1) + 1;
-        const auto owner = player ? player->AsActorValueOwner() : nullptr;
-        const auto actorState = player ? player->AsActorState() : nullptr;
-        const auto controller = player ? player->GetCharController() : nullptr;
-        const auto world = controller ? controller->GetHavokWorld() : nullptr;
-        RE::hkVector4 velocity{};
-        if (controller) {
-            controller->GetLinearVelocityImpl(velocity);
-        }
-
-        std::size_t graphCount = 0;
-        if (player) {
-            RE::BSTSmartPointer<RE::BSAnimationGraphManager> graphManager;
-            player->GetAnimationGraphManager(graphManager);
-            if (graphManager) {
-                graphCount = graphManager->graphs.size();
-            }
-        }
-
-        const auto vats = RE::VATS::GetSingleton();
-        logger::info(
-            "[LethalTrace][State] traceId={} traceSeq={} t={}ms phase='{}' "
-            "modState={} cause={} recovery={} attacker={} damage={} health={} maxHealth={} "
-            "lifeState={} dead={} killMove={} vatsMode={} knockState={} nativeRagdoll={} "
-            "midair={} loaded3D={} position=({:.3f},{:.3f},{:.3f}) angleZ={:.3f} "
-            "controller=0x{:X} world=0x{:X} controllerInWorld={} flags=0x{:08X} "
-            "controllerState={} wantedState={} supportCount={} fallTime={:.3f} gravity={:.3f} "
-            "velocity=({:.3f},{:.3f},{:.3f}) outVelocity=({:.3f},{:.3f},{:.3f}) "
-            "velocityMod=({:.3f},{:.3f},{:.3f}) graphs={} "
-            "graphVars=[IsBleedingOut:{},IsBleedingOutTransition:{},bAnimationDriven:{},"
-            "bIsSynced:{},bInJumpState:{},iGetUpType:{},Speed:{:.3f},SpeedDamped:{:.3f},"
-            "VelocityZ:{:.3f}].",
-            traceId,
-            traceSequence,
-            GetLethalHitTraceElapsed(now),
-            phase,
-            ToString(state.load()),
-            ToString(activeDefeatCause.load()),
-            ToString(activeRecoveryMode.load()),
-            attacker ? fmt::format("{:08X}", attacker->GetFormID()) : std::string("none"),
-            damage,
-            owner ? owner->GetActorValue(RE::ActorValue::kHealth) : -1.0F,
-            owner ? owner->GetPermanentActorValue(RE::ActorValue::kHealth) : -1.0F,
-            player ? static_cast<int>(player->GetLifeState()) : -1,
-            player && player->IsDead(),
-            player && player->IsInKillMove(),
-            vats ? static_cast<int>(vats->mode) : -1,
-            actorState ? static_cast<int>(actorState->GetKnockState()) : -1,
-            IsAlreadyRagdolled(player),
-            player && player->IsInMidair(),
-            player && player->Is3DLoaded(),
-            player ? player->GetPositionX() : 0.0F,
-            player ? player->GetPositionY() : 0.0F,
-            player ? player->GetPositionZ() : 0.0F,
-            player ? player->GetAngleZ() : 0.0F,
-            reinterpret_cast<std::uintptr_t>(controller),
-            reinterpret_cast<std::uintptr_t>(world),
-            world != nullptr,
-            controller ? controller->flags.underlying() : 0U,
-            controller ? static_cast<int>(controller->context.currentState) : -1,
-            controller ? static_cast<int>(controller->wantState) : -1,
-            controller ? controller->supportCount : -1,
-            controller ? controller->fallTime : -1.0F,
-            controller ? controller->gravity : -1.0F,
-            controller ? velocity.quad.m128_f32[0] : 0.0F,
-            controller ? velocity.quad.m128_f32[1] : 0.0F,
-            controller ? velocity.quad.m128_f32[2] : 0.0F,
-            controller ? controller->outVelocity.quad.m128_f32[0] : 0.0F,
-            controller ? controller->outVelocity.quad.m128_f32[1] : 0.0F,
-            controller ? controller->outVelocity.quad.m128_f32[2] : 0.0F,
-            controller ? controller->velocityMod.quad.m128_f32[0] : 0.0F,
-            controller ? controller->velocityMod.quad.m128_f32[1] : 0.0F,
-            controller ? controller->velocityMod.quad.m128_f32[2] : 0.0F,
-            graphCount,
-            ReadGraphBool(player, "IsBleedingOut"),
-            ReadGraphBool(player, "IsBleedingOutTransition"),
-            ReadGraphBool(player, "bAnimationDriven"),
-            ReadGraphBool(player, "bIsSynced"),
-            ReadGraphBool(player, "bInJumpState"),
-            ReadGraphInt(player, "iGetUpType"),
-            ReadGraphFloat(player, "Speed"),
-            ReadGraphFloat(player, "SpeedDamped"),
-            ReadGraphFloat(player, "VelocityZ"));
-    }
-
-    void ScheduleLethalHitTraceSnapshots(
-        std::uint64_t traceId,
-        RE::ActorHandle playerHandle,
-        RE::ActorHandle attackerHandle,
-        std::string anchor) {
-        constexpr std::array delaysMs{ 1, 5, 10, 16, 33, 50, 100, 150, 250, 500, 750, 1000, 1500, 2500, 4000 };
-        for (const int delayMs : delaysMs) {
-            Utils::DelayedDispatcher::Get().PostDelayed(
-                std::chrono::milliseconds(delayMs),
-                [traceId, playerHandle, attackerHandle, anchor, delayMs] {
-                    SKSE::GetTaskInterface()->AddTask(
-                        [traceId, playerHandle, attackerHandle, anchor, delayMs] {
-                            if (activeLethalHitTrace.load() != traceId) {
-                                return;
-                            }
-                            const auto playerActor = playerHandle.get();
-                            auto* player = playerActor && playerActor->IsPlayerRef() ?
-                                static_cast<RE::PlayerCharacter*>(playerActor.get()) : nullptr;
-                            const auto attackerActor = attackerHandle.get();
-                            LogLethalHitTraceState(
-                                fmt::format("{}+{}ms", anchor, delayMs),
-                                player,
-                                attackerActor.get(),
-                                0.0F);
-                        });
-                });
-        }
-    }
-
     void ProtectPlayerForDecision(RE::PlayerCharacter* player, bool applyGhost) {
         auto owner = player->AsActorValueOwner();
         if (owner) {
             SetCurrentActorValue(owner, RE::ActorValue::kHealth, 1.0F);
         }
         player->GetActorRuntimeData().boolFlags.set(RE::Actor::BOOL_FLAGS::kNoBleedoutRecovery);
-        if (applyGhost) {
-            ApplyTemporaryGhost(player);
-        }
+        BeginDamageProtection(player, applyGhost);
         CaptureAndDisableControls();
     }
 
-    void UpdateTextContext(RE::PlayerCharacter* player, RE::Actor* attacker) {
+    void UpdateTextContext(
+        RE::PlayerCharacter* player,
+        RE::Actor* attacker,
+        const DeathPresentation& presentation)
+    {
         TextManager::ClearRuntimeVariables();
         TextManager::SetRuntimeVariable(
             "killer.name",
@@ -644,6 +461,7 @@ namespace {
             }
         }
         TextManager::SetRuntimeVariable("death.location", std::move(locationName));
+        ApplyDeathPresentationContext(presentation);
     }
 
     void ShowDecisionUI(RE::PlayerCharacter* player) {
@@ -652,12 +470,10 @@ namespace {
         }
         if (auto processLists = RE::ProcessLists::GetSingleton()) {
             processLists->StopCombatAndAlarmOnActor(player, true);
-            logger::info("Existing combat and alarms against the player were cleared once.");
         } else {
             logger::warn("Could not clear combat against the player: ProcessLists is unavailable.");
         }
         Prisma::ShowDeathMenu(activeRespawnMask.load());
-        logger::info("Player decision UI applied.");
     }
 
     void ApplyDefeatedPoseAndShowMenu(RE::PlayerCharacter* player) {
@@ -667,39 +483,16 @@ namespace {
 
         const auto selectedPose = static_cast<Settings::DefeatPose>(Settings::Gameplay.defeatPose);
         const bool nativeRagdollPending = adoptPendingNativeRagdoll.exchange(false);
-        if (selectedPose == Settings::DefeatPose::kRagdoll ||
-            selectedPose == Settings::DefeatPose::kPersistentRagdoll) {
+        if (selectedPose == Settings::DefeatPose::kRagdoll) {
             const bool alreadyRagdolled = IsAlreadyRagdolled(player);
             const bool adoptOnly = nativeRagdollPending || alreadyRagdolled;
             player->SetLifeState(RE::ACTOR_LIFE_STATE::kAlive);
-            if (selectedPose == Settings::DefeatPose::kPersistentRagdoll) {
-                const auto request = MoreRagdollClient::Enable(player, adoptOnly);
-                activeRecoveryMode.store(DefeatRecoveryMode::MoreRagdoll);
-                logger::info(
-                    "Requested More Ragdoll persistent hold through {} "
-                    "(accepted={}, existingRagdoll={}, adoptOnly={}).",
-                    MoreRagdollClient::ToString(request.route),
-                    request.accepted,
-                    alreadyRagdolled,
-                    adoptOnly);
-            } else if (!adoptOnly) {
-                const bool accepted = player->NotifyAnimationGraph("RagdollInstant");
-                activeRecoveryMode.store(DefeatRecoveryMode::VanillaRagdoll);
-                logger::info("Requested vanilla RagdollInstant (accepted={}).", accepted);
-            } else {
-                activeRecoveryMode.store(DefeatRecoveryMode::VanillaRagdoll);
-                logger::info(
-                    "Adopted the existing or pending native player ragdoll; "
-                    "RagdollInstant was not sent again.");
-            }
-            logger::info(
-                "Player defeat pose applied as {} ragdoll without unconscious state.",
-                selectedPose == Settings::DefeatPose::kPersistentRagdoll ? "persistent" : "vanilla");
+            MoreRagdollClient::Enable(player, adoptOnly);
+            activeRecoveryMode.store(DefeatRecoveryMode::Ragdoll);
         } else {
             player->SetLifeState(RE::ACTOR_LIFE_STATE::kBleedout);
             player->NotifyAnimationGraph("BleedoutStart");
             activeRecoveryMode.store(DefeatRecoveryMode::Bleedout);
-            logger::info("Player defeat pose applied as bleedout.");
         }
 
         ShowDecisionUI(player);
@@ -725,25 +518,13 @@ namespace {
                     "the player handle expired.",
                     ToString(cause));
                 state.store(DeathState::Alive);
+                EndDamageProtection(nullptr, "impact pose failed because player expired");
                 RestoreControls();
                 return;
             }
 
             const bool nativeRagdollAfterImpact = IsAlreadyRagdolled(player);
             adoptPendingNativeRagdoll.store(nativeRagdollAfterImpact);
-            logger::info(
-                "Finalizing {} defeat on the next engine task: nativeRagdollAfterImpact={}, "
-                "adoptPendingNativeRagdoll={}. A missing native ragdoll will be created by "
-                "More Ragdoll through the Numpad 7 knock-explosion route.",
-                ToString(cause),
-                nativeRagdollAfterImpact,
-                adoptPendingNativeRagdoll.load());
-            LogLethalHitTraceState(
-                cause == DefeatCause::Projectile ?
-                    "ProjectileDefeat:after-impact-task" : "LethalFallDefeat:after-impact-task",
-                player,
-                nullptr,
-                0.0F);
             ApplyDefeatedPoseAndShowMenu(player);
         });
     }
@@ -761,6 +542,7 @@ namespace {
         auto player = RE::PlayerCharacter::GetSingleton();
         if (!player) {
             state.store(DeathState::Alive);
+            EndDamageProtection(nullptr, "killmove finalization lost player");
             return;
         }
 
@@ -780,7 +562,6 @@ namespace {
         killMoveAttacker.reset();
         ApplyTemporaryGhost(player);
         ApplyDefeatedPoseAndShowMenu(player);
-        logger::info("Pending killmove defeat finalized{}.", forced ? " by fallback" : " from animation event");
     }
 
     void ScheduleKillMoveFallback(std::uint64_t generation) {
@@ -818,29 +599,29 @@ namespace {
             controllerAfter);
     }
 
-    void LogRecoveryState(RE::PlayerCharacter* player, std::string_view context) {
-        const auto actorState = player ? player->AsActorState() : nullptr;
-        const auto controller = player ? player->GetCharController() : nullptr;
-        const bool controllerInWorld = controller && controller->GetHavokWorld();
-        logger::info(
-            "Ragdoll recovery state at '{}': lifeState={}, knockState={}, getUpStarted={}, "
-            "controllerEvent={}, controllerPresent={}, controllerInWorld={}, nativeRagdoll={}, "
-            "midair={}, controllerFlags=0x{:08X}, controllerState={}, wantedState={}, supportCount={}, "
-            "getUpFinished={}.",
-            context,
-            player ? static_cast<int>(player->GetLifeState()) : -1,
-            actorState ? static_cast<int>(actorState->GetKnockState()) : -1,
-            recoveryGetUpStarted.load(),
-            recoveryControllerAdded.load(),
-            controller != nullptr,
-            controllerInWorld,
-            player && player->IsInRagdollState(),
-            player && player->IsInMidair(),
-            controller ? controller->flags.underlying() : 0U,
-            controller ? static_cast<int>(controller->context.currentState) : -1,
-            controller ? static_cast<int>(controller->wantState) : -1,
-            controller ? controller->supportCount : -1,
-            recoveryGetUpFinished.load());
+    bool IsDestinationRespawn(Respawn::Option option) {
+        return option == Respawn::Option::LastSleep ||
+            option == Respawn::Option::LastCheckpoint;
+    }
+
+    bool HasRespawnDestination(Respawn::Option option) {
+        if (option == Respawn::Option::LastSleep) {
+            return CheckpointManager::HasLastSleep();
+        }
+        if (option == Respawn::Option::LastCheckpoint) {
+            return CheckpointManager::HasCheckpoint();
+        }
+        return true;
+    }
+
+    bool MoveToRespawnDestination(Respawn::Option option) {
+        if (option == Respawn::Option::LastSleep) {
+            return CheckpointManager::MovePlayerToLastSleep();
+        }
+        if (option == Respawn::Option::LastCheckpoint) {
+            return CheckpointManager::MovePlayerToCheckpoint();
+        }
+        return true;
     }
 
     void CompleteRespawn(std::uint64_t generation, std::string reason) {
@@ -854,18 +635,25 @@ namespace {
         if (!player) {
             logger::error("Could not complete respawn after '{}': player is unavailable.", reason);
             state.store(DeathState::Alive);
+            EndDamageProtection(nullptr, "respawn completion lost player");
             RestoreControls();
             return;
         }
 
-        LogRecoveryState(player, reason);
+        const auto completedOption = activeRespawnOption.load();
+        if (IsDestinationRespawn(completedOption)) {
+            const bool moved = MoveToRespawnDestination(completedOption);
+            if (!moved) {
+                logger::error(
+                    "The '{}' destination was valid when selected but could not be resolved "
+                    "after recovery; completing at the recovered current position.",
+                    Respawn::ToString(completedOption));
+            }
+        }
         RestoreControls();
-        player->NotifyAnimationGraph("TrickDeathRevive");
+        player->NotifyAnimationGraph("TrickDeathRespawn");
         state.store(DeathState::Recovering);
-        logger::info(
-            "Player respawn completed after '{}'; controls restored and TrickDeathRevive sent.",
-            reason);
-        IntegrationEvents::SendRespawnCompleted(activeRespawnOption.load());
+        IntegrationEvents::SendRespawnCompleted(completedOption);
         FinishRecoveryLater();
     }
 
@@ -896,7 +684,6 @@ namespace {
                                 "Deferred ragdoll recovery completion after '{}': "
                                 "the character controller is not in a Havok world.",
                                 reason);
-                            LogRecoveryState(player, "deferred completion rejected");
                             return;
                         }
                         CompleteRespawn(generation, reason);
@@ -917,8 +704,6 @@ namespace {
                 if (!player) {
                     return;
                 }
-                LogRecoveryState(player, "first fallback");
-
                 if (RefreshControllerConfirmation(player)) {
                     logger::warn(
                         "GetUpEnd/GetUpExit was not observed, but the character controller returned; "
@@ -936,7 +721,7 @@ namespace {
                 if (!recoveryGetUpStarted.load()) {
                     const bool resent = player->NotifyAnimationGraph("GetUpBegin");
                     logger::warn(
-                        "The vanilla get-up sequence did not emit GetUpStart; resent GetUpBegin once "
+                        "The ragdoll get-up sequence did not emit GetUpStart; resent GetUpBegin once "
                         "(accepted={}).",
                         resent);
                 } else {
@@ -959,7 +744,6 @@ namespace {
                 if (!player) {
                     return;
                 }
-                LogRecoveryState(player, "direct GetUpStart fallback");
                 if (RefreshControllerConfirmation(player)) {
                     ScheduleRagdollRecoveryCompletion(
                         generation,
@@ -982,7 +766,7 @@ namespace {
                 const bool controllerEventAccepted =
                     player->NotifyAnimationGraph("AddCharacterControllerToWorld");
                 logger::warn(
-                    "The vanilla get-up sequence did not restore the character controller; sent one "
+                    "The ragdoll get-up sequence did not restore the character controller; sent one "
                     "direct AddCharacterControllerToWorld fallback (accepted={}).",
                     controllerEventAccepted);
             });
@@ -1000,7 +784,6 @@ namespace {
                 if (!player) {
                     return;
                 }
-                LogRecoveryState(player, "final animation-state fallback");
                 if (RefreshControllerConfirmation(player)) {
                     ScheduleRagdollRecoveryCompletion(
                         generation,
@@ -1030,26 +813,25 @@ namespace {
             return false;
         }
         player->GetActorRuntimeData().boolFlags.reset(RE::Actor::BOOL_FLAGS::kNoBleedoutRecovery);
-        RestoreTemporaryGhost(player);
         player->SetLifeState(RE::ACTOR_LIFE_STATE::kAlive);
-        fallSequenceActive.store(false);
-        lastFallEventMilliseconds.store(0);
-        lastLandingEventMilliseconds.store(0);
         const auto previousRecoveryMode = activeRecoveryMode.exchange(DefeatRecoveryMode::None);
-        const bool reviveFromRagdoll =
-            previousRecoveryMode == DefeatRecoveryMode::VanillaRagdoll ||
-            previousRecoveryMode == DefeatRecoveryMode::MoreRagdoll;
+        const bool reviveFromRagdoll = previousRecoveryMode == DefeatRecoveryMode::Ragdoll;
         if (previousRecoveryMode == DefeatRecoveryMode::Bleedout) {
             player->NotifyAnimationGraph("BleedoutStop");
         }
         auto owner = player->AsActorValueOwner();
-        SetActorValuePercent(owner, RE::ActorValue::kHealth, Settings::Gameplay.healthPercent);
-        SetActorValuePercent(owner, RE::ActorValue::kMagicka, Settings::Gameplay.magickaPercent);
-        SetActorValuePercent(owner, RE::ActorValue::kStamina, Settings::Gameplay.staminaPercent);
-        logger::info(
-            "Restoring player resources: recoveryMode={}, healthAfter={}",
-            static_cast<int>(previousRecoveryMode),
-            owner ? owner->GetActorValue(RE::ActorValue::kHealth) : -1.0F);
+        const auto healthPercent = Settings::ResolveNumericValue(
+            Settings::Gameplay.healthPercent, player, 1, 100);
+        const auto magickaPercent = Settings::ResolveNumericValue(
+            Settings::Gameplay.magickaPercent, player, 0, 100);
+        const auto staminaPercent = Settings::ResolveNumericValue(
+            Settings::Gameplay.staminaPercent, player, 0, 100);
+        SetActorValuePercent(owner, RE::ActorValue::kHealth, healthPercent);
+        SetActorValuePercent(owner, RE::ActorValue::kMagicka, magickaPercent);
+        SetActorValuePercent(owner, RE::ActorValue::kStamina, staminaPercent);
+        if (owner) {
+            protectedHealth.store(std::max(1.0F, owner->GetActorValue(RE::ActorValue::kHealth)));
+        }
         if (reviveFromRagdoll) {
             awaitingRagdollRecovery.store(true);
             recoveryGetUpStarted.store(false);
@@ -1057,50 +839,42 @@ namespace {
             recoveryGetUpFinished.store(false);
             recoveryCompletionScheduled.store(false);
             const auto generation = defeatGeneration.load();
-            bool getUpAccepted = false;
-            std::string releaseRoute;
-            if (previousRecoveryMode == DefeatRecoveryMode::MoreRagdoll) {
-                const auto request = MoreRagdollClient::Disable(player);
-                getUpAccepted = request.accepted;
-                releaseRoute = fmt::format(
-                    "MoreRagdollDisable through {}",
-                    MoreRagdollClient::ToString(request.route));
-            } else {
-                getUpAccepted = player->NotifyAnimationGraph("GetUpBegin");
-                releaseRoute = "GetUpBegin animation event";
-            }
+            MoreRagdollClient::Disable(player);
             ScheduleRagdollRecoveryFallback(generation);
-            LogRecoveryState(player, releaseRoute);
-            logger::info(
-                "Player ragdoll release requested through {} (accepted={}); "
-                "GetUpStart is now left to the vanilla sequence and controls remain disabled until "
-                "recovery confirmation",
-                releaseRoute,
-                getUpAccepted);
             return true;
         }
 
         RestoreControls();
-        player->NotifyAnimationGraph("TrickDeathRevive");
-        logger::info(
-            "Player non-ragdoll respawn completed from recovery mode {}; "
-            "animation event 'TrickDeathRevive' sent.",
-            static_cast<int>(previousRecoveryMode));
+        player->NotifyAnimationGraph("TrickDeathRespawn");
         return false;
     }
 
     void FinishRecoveryLater() {
-        const auto seconds = Settings::Gameplay.invulnerabilitySeconds;
+        const auto seconds = Settings::ResolveNumericValue(
+            Settings::Gameplay.invulnerabilitySeconds,
+            RE::PlayerCharacter::GetSingleton(),
+            0,
+            30);
+        const auto generation = defeatGeneration.load();
         if (seconds <= 0) {
-            state.store(DeathState::Alive);
-            activeDefeatCause.store(DefeatCause::None);
+            auto expected = DeathState::Recovering;
+            if (state.compare_exchange_strong(expected, DeathState::Alive)) {
+                EndDamageProtection(RE::PlayerCharacter::GetSingleton(), "recovery completed with zero grace time");
+                activeDefeatCause.store(DefeatCause::None);
+            }
             return;
         }
 
-        Utils::DelayedDispatcher::Get().PostDelayed(std::chrono::seconds(seconds), [] {
-            SKSE::GetTaskInterface()->AddTask([] {
+        damageProtectionDeadlineMilliseconds.store(
+            GetSteadyMilliseconds() + static_cast<std::int64_t>(seconds) * 1000);
+        Utils::DelayedDispatcher::Get().PostDelayed(std::chrono::seconds(seconds), [generation] {
+            SKSE::GetTaskInterface()->AddTask([generation] {
+                if (generation != defeatGeneration.load()) {
+                    return;
+                }
                 auto expected = DeathState::Recovering;
                 if (state.compare_exchange_strong(expected, DeathState::Alive)) {
+                    EndDamageProtection(RE::PlayerCharacter::GetSingleton(), "post-recovery invulnerability elapsed");
                     activeDefeatCause.store(DefeatCause::None);
                 }
             });
@@ -1124,17 +898,28 @@ namespace {
             Prisma::ShowError("Player is not available.");
             return;
         }
-        if (option == Respawn::Option::LastSleep && !CheckpointManager::MovePlayerToLastSleep()) {
+        if (IsDestinationRespawn(option) && !HasRespawnDestination(option)) {
             state.store(DeathState::Defeated);
-            Prisma::ShowError("No valid sleep checkpoint is available.");
-            return;
-        }
-        if (option == Respawn::Option::LastCheckpoint && !CheckpointManager::MovePlayerToCheckpoint()) {
-            state.store(DeathState::Defeated);
-            Prisma::ShowError("No valid external checkpoint is available.");
+            Prisma::ShowError(
+                option == Respawn::Option::LastSleep ?
+                    "No valid sleep checkpoint is available." :
+                    "No valid external checkpoint is available.");
             return;
         }
 
+        const auto recoveryMode = activeRecoveryMode.load();
+        const bool deferDestinationUntilRagdollRecovery =
+            IsDestinationRespawn(option) &&
+            recoveryMode == DefeatRecoveryMode::Ragdoll;
+        if (IsDestinationRespawn(option) && !deferDestinationUntilRagdollRecovery &&
+            !MoveToRespawnDestination(option)) {
+            state.store(DeathState::Defeated);
+            Prisma::ShowError(
+                option == Respawn::Option::LastSleep ?
+                    "No valid sleep checkpoint is available." :
+                    "No valid external checkpoint is available.");
+            return;
+        }
         activeRespawnOption.store(option);
         IntegrationEvents::SendRespawnSelected(option);
         Prisma::Hide();
@@ -1146,10 +931,20 @@ namespace {
         }
     }
 
-    void LoadLastSave() {
-        if (!Respawn::Contains(activeRespawnMask.load(), Respawn::Option::LoadLastSave)) {
-            logger::warn("Rejected unavailable load-last-save option.");
-            Prisma::ShowError("Loading the last save is currently unavailable.");
+    void ReloadCurrentSave() {
+        if (!Respawn::Contains(activeRespawnMask.load(), Respawn::Option::ReloadSave)) {
+            logger::warn("Rejected unavailable reload-save option.");
+            Prisma::ShowError("Reloading the current save is currently unavailable.");
+            return;
+        }
+        const auto saveName = CurrentSaveManager::GetCurrentSaveName();
+        auto manager = RE::BGSSaveLoadManager::GetSingleton();
+        if (saveName.empty() || !manager) {
+            logger::warn(
+                "Could not reload current save: name='{}', managerAvailable={}.",
+                saveName,
+                manager != nullptr);
+            Prisma::ShowError("No current save is available to reload.");
             return;
         }
         auto expected = DeathState::Defeated;
@@ -1157,148 +952,18 @@ namespace {
             return;
         }
 
-        activeRespawnOption.store(Respawn::Option::LoadLastSave);
-        IntegrationEvents::SendRespawnSelected(Respawn::Option::LoadLastSave);
+        activeRespawnOption.store(Respawn::Option::ReloadSave);
+        IntegrationEvents::SendRespawnSelected(Respawn::Option::ReloadSave);
         Prisma::Hide();
         RestoreTemporaryGhost(RE::PlayerCharacter::GetSingleton());
         RestoreControls();
-        auto manager = RE::BGSSaveLoadManager::GetSingleton();
-        if (!manager || !manager->LoadMostRecentSaveGame()) {
-            state.store(DeathState::Defeated);
-            ApplyTemporaryGhost(RE::PlayerCharacter::GetSingleton());
-            CaptureAndDisableControls();
-            Prisma::ShowDeathMenu(activeRespawnMask.load());
-            Prisma::ShowError("Could not load the most recent save.");
-        }
+        manager->Load(saveName.c_str());
     }
-}
-
-void DeathManager::LogHealthDamageHookSnapshot(
-    std::string_view phase,
-    std::uint64_t damageSequence,
-    std::uintptr_t callerOffset,
-    RE::PlayerCharacter* player,
-    RE::Actor* attacker,
-    float rawDamage,
-    float forwardedDamage) {
-    if (phase == "entry" && player && attacker) {
-        const auto traceId = BeginOrExtendLethalHitTrace(player, attacker, "HealthDamageHook");
-        ScheduleLethalHitTraceSnapshots(
-            traceId,
-            player->GetHandle(),
-            attacker->GetHandle(),
-            fmt::format("damageSeq={}", damageSequence));
-    }
-    LogLethalHitTraceState(
-        fmt::format("DamageHook:{}:damageSeq={}", phase, damageSequence),
-        player,
-        attacker,
-        rawDamage);
-
-    const auto owner = player ? player->AsActorValueOwner() : nullptr;
-    const float healthNow = owner ? owner->GetActorValue(RE::ActorValue::kHealth) : -1.0F;
-    const float estimatedBeforeSignedDamage = healthNow - rawDamage;
-    const float estimatedBeforeMagnitude = healthNow + std::abs(rawDamage);
-    const auto actorState = player ? player->AsActorState() : nullptr;
-    const auto controller = player ? player->GetCharController() : nullptr;
-    const auto now = GetSteadyMilliseconds();
-    const auto lastFall = lastFallEventMilliseconds.load();
-    const auto lastLanding = lastLandingEventMilliseconds.load();
-    logger::info(
-        "[DamageHook] phase={} damageSeq={} caller=SkyrimSE+0x{:X} state={} cause={} "
-        "recovery={} attacker={} rawDamage={} forwardedDamage={} healthNow={} "
-        "healthMinusRaw={} healthPlusMagnitude={} fallActive={} diagnosticMsSinceJumpFall={} "
-        "diagnosticMsSinceLanding={} lifeState={} knockState={} nativeRagdoll={} midair={} "
-        "controllerPresent={} controllerInWorld={} controllerFlags=0x{:08X} "
-        "controllerState={} wantedState={} supportCount={}.",
-        phase,
-        damageSequence,
-        callerOffset,
-        ToString(state.load()),
-        ToString(activeDefeatCause.load()),
-        ToString(activeRecoveryMode.load()),
-        attacker ? fmt::format("{:08X}", attacker->GetFormID()) : std::string("none"),
-        rawDamage,
-        forwardedDamage,
-        healthNow,
-        estimatedBeforeSignedDamage,
-        estimatedBeforeMagnitude,
-        fallSequenceActive.load(),
-        lastFall > 0 ? now - lastFall : -1,
-        lastLanding > 0 ? now - lastLanding : -1,
-        player ? static_cast<int>(player->GetLifeState()) : -1,
-        actorState ? static_cast<int>(actorState->GetKnockState()) : -1,
-        IsAlreadyRagdolled(player),
-        player && player->IsInMidair(),
-        controller != nullptr,
-        controller && controller->GetHavokWorld(),
-        controller ? controller->flags.underlying() : 0U,
-        controller ? static_cast<int>(controller->context.currentState) : -1,
-        controller ? static_cast<int>(controller->wantState) : -1,
-        controller ? controller->supportCount : -1);
-}
-
-void DeathManager::LogKillHookSnapshot(
-    std::uintptr_t callerOffset,
-    RE::PlayerCharacter* player,
-    RE::Actor* attacker,
-    float damage,
-    bool sendEvent,
-    bool ragdollInstantRequested) {
-    if (player) {
-        const auto traceId = BeginOrExtendLethalHitTrace(player, attacker, "KillHook");
-        ScheduleLethalHitTraceSnapshots(
-            traceId,
-            player->GetHandle(),
-            attacker ? attacker->GetHandle() : RE::ActorHandle{},
-            "KillHook");
-        LogLethalHitTraceState("KillHook:entry", player, attacker, damage);
-    }
-
-    const auto owner = player ? player->AsActorValueOwner() : nullptr;
-    const auto actorState = player ? player->AsActorState() : nullptr;
-    const auto controller = player ? player->GetCharController() : nullptr;
-    const auto sequence = diagnosticEventSequence.fetch_add(1) + 1;
-    logger::info(
-        "[KillHook] diagnosticSeq={} caller=SkyrimSE+0x{:X} state={} cause={} recovery={} "
-        "attacker={} damage={} sendEvent={} ragdollInstantRequested={} health={} lifeState={} "
-        "knockState={} nativeRagdoll={} midair={} controllerPresent={} controllerInWorld={} "
-        "controllerFlags=0x{:08X} controllerState={} wantedState={} supportCount={}.",
-        sequence,
-        callerOffset,
-        ToString(state.load()),
-        ToString(activeDefeatCause.load()),
-        ToString(activeRecoveryMode.load()),
-        attacker ? fmt::format("{:08X}", attacker->GetFormID()) : std::string("none"),
-        damage,
-        sendEvent,
-        ragdollInstantRequested,
-        owner ? owner->GetActorValue(RE::ActorValue::kHealth) : -1.0F,
-        player ? static_cast<int>(player->GetLifeState()) : -1,
-        actorState ? static_cast<int>(actorState->GetKnockState()) : -1,
-        IsAlreadyRagdolled(player),
-        player && player->IsInMidair(),
-        controller != nullptr,
-        controller && controller->GetHavokWorld(),
-        controller ? controller->flags.underlying() : 0U,
-        controller ? static_cast<int>(controller->context.currentState) : -1,
-        controller ? static_cast<int>(controller->wantState) : -1,
-        controller ? controller->supportCount : -1);
-}
-
-void DeathManager::LogLethalHitTraceSnapshot(
-    std::string_view phase,
-    RE::PlayerCharacter* player,
-    RE::Actor* attacker,
-    float damage) {
-    LogLethalHitTraceState(phase, player, attacker, damage);
 }
 
 void DeathManager::CaptureAppliedPlayerDamage(
-    std::uint64_t damageSequence,
     RE::PlayerCharacter* player,
-    RE::Actor* attacker,
-    float rawDamage) {
+    RE::Actor* attacker) {
     const auto owner = player ? player->AsActorValueOwner() : nullptr;
     const float health = owner ? owner->GetActorValue(RE::ActorValue::kHealth) : 1.0F;
     const bool lethal = std::isfinite(health) && health <= 0.0F;
@@ -1314,7 +979,6 @@ void DeathManager::CaptureAppliedPlayerDamage(
         }
 
         captured.valid = true;
-        captured.damageSequence = damageSequence;
         captured.attacker = attacker ? attacker->GetFormID() : 0;
 
         const bool hitMatchesAttacker =
@@ -1331,9 +995,7 @@ void DeathManager::CaptureAppliedPlayerDamage(
             captured.attacker = pendingPlayerHit.attacker != 0 ?
                 pendingPlayerHit.attacker : captured.attacker;
             captured.source = pendingPlayerHit.source;
-            captured.projectile = pendingPlayerHit.projectile;
             captured.sourceType = pendingPlayerHit.sourceType;
-            captured.hitFlags = pendingPlayerHit.flags;
         } else if (pendingFallDamage.valid && !attacker) {
             captured.origin = AppliedDamageOrigin::FallPhysics;
         } else {
@@ -1344,43 +1006,16 @@ void DeathManager::CaptureAppliedPlayerDamage(
         pendingPlayerHit = {};
         pendingFallDamage = {};
     }
-
-    logger::info(
-        "Captured lethal damage context without a time window: damageSeq={} origin={} "
-        "attacker={:08X} source={:08X} sourceType={} projectile={:08X} "
-        "hitFlags=0x{:02X} rawDamage={} health={}.",
-        captured.damageSequence,
-        ToString(captured.origin),
-        captured.attacker,
-        captured.source,
-        captured.sourceType,
-        captured.projectile,
-        captured.hitFlags,
-        rawDamage,
-        health);
 }
 
-void DeathManager::MarkPlayerFallDamage(
-    float fallDistance,
-    float calculatedDamage,
-    bool moveFinishSource) {
+void DeathManager::MarkPlayerFallDamage() {
     FallDamageContext context;
     {
         std::scoped_lock lock(damageContextLock);
         context.valid = true;
         context.serial = ++nextDamageContextSerial;
-        context.fallDistance = fallDistance;
-        context.calculatedDamage = calculatedDamage;
-        context.moveFinishSource = moveFinishSource;
         pendingFallDamage = context;
     }
-    logger::info(
-        "Marked causal fall-damage context: serial={} source={} fallDistance={} "
-        "calculatedDamage={}.",
-        context.serial,
-        context.moveFinishSource ? "move-finish" : "fall-physics",
-        context.fallDistance,
-        context.calculatedDamage);
 }
 
 void DeathManager::HandlePlayerHitEvent(const RE::TESHitEvent& event) {
@@ -1391,6 +1026,10 @@ void DeathManager::HandlePlayerHitEvent(const RE::TESHitEvent& event) {
     }
 
     auto* player = static_cast<RE::PlayerCharacter*>(target);
+    if (IsDamageBlocked()) {
+        RepairBlockedPlayerHealth(player);
+        return;
+    }
     const auto sourceForm = event.source ? RE::TESForm::LookupByID(event.source) : nullptr;
     const auto sourceType = sourceForm ? sourceForm->GetFormType() : RE::FormType::None;
     const auto sourceWeapon = sourceForm ? sourceForm->As<RE::TESObjectWEAP>() : nullptr;
@@ -1410,51 +1049,17 @@ void DeathManager::HandlePlayerHitEvent(const RE::TESHitEvent& event) {
         hitContext.serial = ++nextDamageContextSerial;
         hitContext.attacker = attacker ? attacker->GetFormID() : 0;
         hitContext.source = event.source;
-        hitContext.projectile = event.projectile;
         hitContext.sourceType = sourceType;
-        hitContext.flags = event.flags.underlying();
         hitContext.projectileImpact = projectileHit;
         pendingPlayerHit = hitContext;
     }
-    const auto traceId = BeginOrExtendLethalHitTrace(player, attacker, "TESHitEvent");
-    const auto traceSequence = lethalHitTraceLogSequence.fetch_add(1) + 1;
-    logger::info(
-        "[LethalTrace][HitEvent] traceId={} traceSeq={} t={}ms target={:08X} "
-        "attacker={} source={:08X} sourceType={} projectile={:08X} flags=0x{:02X} "
-        "power={} sneak={} bash={} blocked={} contextSerial={} projectileContext={}.",
-        traceId,
-        traceSequence,
-        GetLethalHitTraceElapsed(),
-        player->GetFormID(),
-        attacker ? fmt::format("{:08X}", attacker->GetFormID()) : std::string("none"),
-        event.source,
-        sourceType,
-        event.projectile,
-        event.flags.underlying(),
-        event.flags.any(RE::TESHitEvent::Flag::kPowerAttack),
-        event.flags.any(RE::TESHitEvent::Flag::kSneakAttack),
-        event.flags.any(RE::TESHitEvent::Flag::kBashAttack),
-        event.flags.any(RE::TESHitEvent::Flag::kHitBlocked),
-        hitContext.serial,
-        projectileHit);
-    LogLethalHitTraceState("TESHitEvent", player, attacker, 0.0F);
 }
 
 bool DeathManager::TryInterceptDeath(
     RE::PlayerCharacter* player,
     RE::Actor* attacker,
-    bool ragdollInstantRequested) {
-    LogLethalHitTraceState(
-        "TryInterceptDeath:entry",
-        player,
-        attacker,
-        0.0F);
+    bool) {
     if (!player || !Settings::Gameplay.enabled) {
-        LogLethalHitTraceState(
-            "TryInterceptDeath:not-intercepted-disabled-or-no-player",
-            player,
-            attacker,
-            0.0F);
         return false;
     }
 
@@ -1463,98 +1068,45 @@ bool DeathManager::TryInterceptDeath(
             owner->GetActorValue(RE::ActorValue::kHealth) < 1.0F) {
             SetCurrentActorValue(owner, RE::ActorValue::kHealth, 1.0F);
         }
-        logger::info("Ignored player KillImpl while God Mode is active.");
-        LogLethalHitTraceState("TryInterceptDeath:god-mode", player, attacker, 0.0F);
         return true;
     }
 
     const auto current = state.load();
     if (current != DeathState::Alive) {
-        if (auto owner = player->AsActorValueOwner()) {
-            SetCurrentActorValue(owner, RE::ActorValue::kHealth, 1.0F);
-        }
-        LogLethalHitTraceState(
-            "TryInterceptDeath:already-defeated",
-            player,
-            attacker,
-            0.0F);
+        RepairBlockedPlayerHealth(player);
         return true;
     }
 
     const auto respawnEvaluation = RespawnPolicyManager::Evaluate();
     if (respawnEvaluation.trickDeathDisabled || respawnEvaluation.availableMask == 0) {
-        logger::info(
-            "Death was not intercepted by respawn policy: disabled={}, available=0x{:X}, blocked=0x{:X}.",
-            respawnEvaluation.trickDeathDisabled,
-            respawnEvaluation.availableMask,
-            respawnEvaluation.blockedMask);
-        LogLethalHitTraceState(
-            "TryInterceptDeath:not-intercepted-respawn-policy",
-            player,
-            attacker,
-            0.0F);
         return false;
     }
 
     if (!Prisma::CanShow()) {
         logger::error("Death was not intercepted because PrismaUI is unavailable or not ready.");
-        LogLethalHitTraceState(
-            "TryInterceptDeath:not-intercepted-prisma-unavailable",
-            player,
-            attacker,
-            0.0F);
         return false;
     }
 
     const bool inKillMove = IsPlayerKillMoveActive(player);
     const bool alreadyRagdolled = IsAlreadyRagdolled(player);
-    const bool inMidair = player->IsInMidair();
     const auto lethalDamage = ConsumeLethalDamageContext(attacker);
     const bool projectileImpact =
         !inKillMove && lethalDamage.origin == AppliedDamageOrigin::ProjectileImpact;
     const bool lethalFall =
         !inKillMove && lethalDamage.origin == AppliedDamageOrigin::FallPhysics;
+    const auto deathPresentation = ClassifyDeathPresentation(lethalDamage);
 
     // Only adopt physical state that actually exists. A fall/projectile context
     // is a damage cause, not proof that the engine created a ragdoll.
     adoptPendingNativeRagdoll.store(alreadyRagdolled || inKillMove);
-    const auto actorState = player->AsActorState();
-    logger::info(
-        "Intercepting player death: attacker={}, ragdollInstantRequested={}, inKillMove={}, "
-        "nativeRagdoll={}, midair={}, knockState={}, fallAnimationActive={}, "
-        "causalDamageSeq={}, causalOrigin={}, projectile={:08X}, hitSource={:08X}, "
-        "hitSourceType={}, hitFlags=0x{:02X}, classifiedProjectile={}, "
-        "classifiedLethalFall={}, adoptPendingNativeRagdoll={}.",
-        attacker ? fmt::format("{:08X}", attacker->GetFormID()) : std::string("none"),
-        ragdollInstantRequested,
-        inKillMove,
-        alreadyRagdolled,
-        inMidair,
-        actorState ? static_cast<int>(actorState->GetKnockState()) : -1,
-        fallSequenceActive.load(),
-        lethalDamage.damageSequence,
-        ToString(lethalDamage.origin),
-        lethalDamage.projectile,
-        lethalDamage.source,
-        lethalDamage.sourceType,
-        lethalDamage.hitFlags,
-        projectileImpact,
-        lethalFall,
-        adoptPendingNativeRagdoll.load());
     auto expected = DeathState::Alive;
     const auto nextState = inKillMove ? DeathState::PendingKillMove : DeathState::Defeated;
     if (!state.compare_exchange_strong(expected, nextState)) {
-        LogLethalHitTraceState(
-            "TryInterceptDeath:state-race-consumed",
-            player,
-            attacker,
-            0.0F);
         return true;
     }
 
     activeRespawnMask.store(respawnEvaluation.availableMask);
     activeRespawnOption.store(Respawn::Option::None);
-    UpdateTextContext(player, attacker);
 
     activeDefeatCause.store(
         inKillMove ? DefeatCause::KillMove :
@@ -1563,120 +1115,29 @@ bool DeathManager::TryInterceptDeath(
     activeRecoveryMode.store(DefeatRecoveryMode::None);
 
     const auto generation = defeatGeneration.fetch_add(1) + 1;
+    DeathTrackerManager::RecordDeath(player);
+    UpdateTextContext(player, attacker, deathPresentation);
+    ProtectPlayerForDecision(player, !inKillMove);
+    player->NotifyAnimationGraph("TrickDeathStarted");
     if (inKillMove) {
-        ProtectPlayerForDecision(player, false);
         killMoveAttacker = attacker ? attacker->GetHandle() : RE::ActorHandle{};
-        logger::info("Player defeat intercepted during killcam; waiting for the player animation event.");
         ScheduleKillMoveFallback(generation);
     } else if (projectileImpact || lethalFall) {
-        ProtectPlayerForDecision(player, true);
         const auto impactCause = projectileImpact ? DefeatCause::Projectile : DefeatCause::LethalFall;
         ScheduleImpactDefeatPose(generation, player->GetHandle(), impactCause);
-        if (lethalFall) {
-            fallSequenceActive.store(false);
-        }
-        logger::info(
-            "Player {} defeat intercepted from causal damage context; pose application "
-            "was queued after the current engine damage stack.",
-            ToString(impactCause));
     } else {
-        ProtectPlayerForDecision(player, true);
         ApplyDefeatedPoseAndShowMenu(player);
-        logger::info("Player defeat intercepted outside a killcam.");
     }
-    LogLethalHitTraceState(
-        inKillMove ? "TryInterceptDeath:intercepted-killmove" :
-        projectileImpact ? "TryInterceptDeath:intercepted-projectile-causal" :
-        lethalFall ? "TryInterceptDeath:intercepted-lethal-fall-causal" :
-                     "TryInterceptDeath:intercepted-standard-after-pose",
-        player,
-        attacker,
-        0.0F);
     return true;
 }
 
 void DeathManager::HandlePlayerAnimationEvent(
     std::string_view eventName,
-    std::string_view payload,
-    std::uintptr_t graphSource) {
-    const auto now = GetSteadyMilliseconds();
-    const auto normalizedEvent = NormalizeAnimationEvent(eventName);
-    BufferAnimationEvent(now, graphSource, eventName, payload);
-
-    if (IsLethalHitTraceActive(now)) {
-        const auto traceId = activeLethalHitTrace.load();
-        const auto traceSequence = lethalHitTraceLogSequence.fetch_add(1) + 1;
-        const auto previousAnimationEvent = lastLethalHitTraceAnimationMilliseconds.exchange(now);
-        logger::info(
-            "[LethalTrace][AnimEvent] traceId={} traceSeq={} t={}ms graphSource=0x{:X} "
-            "event='{}' payload='{}' deltaFromPreviousAnimationMs={}.",
-            traceId,
-            traceSequence,
-            GetLethalHitTraceElapsed(now),
-            graphSource,
-            eventName,
-            payload,
-            previousAnimationEvent > 0 ? now - previousAnimationEvent : -1);
-        LogLethalHitTraceState(
-            fmt::format("AnimEvent:{}", eventName),
-            RE::PlayerCharacter::GetSingleton(),
-            nullptr,
-            0.0F);
-    } else if (IsDiagnosticAnimationEvent(normalizedEvent)) {
-        const auto sequence = diagnosticEventSequence.fetch_add(1) + 1;
-        const auto previousAnimationEvent = lastDiagnosticAnimationMilliseconds.exchange(now);
-        const auto player = RE::PlayerCharacter::GetSingleton();
-        const auto owner = player ? player->AsActorValueOwner() : nullptr;
-        const auto actorState = player ? player->AsActorState() : nullptr;
-        const auto controller = player ? player->GetCharController() : nullptr;
-        logger::info(
-            "[AnimEvent] diagnosticSeq={} graphSource=0x{:X} event='{}' payload='{}' "
-            "deltaFromPreviousDiagnosticMs={} state={} cause={} recovery={} health={} "
-            "lifeState={} knockState={} nativeRagdoll={} midair={} controllerPresent={} "
-            "controllerInWorld={} controllerFlags=0x{:08X} controllerState={} wantedState={} "
-            "supportCount={}.",
-            sequence,
-            graphSource,
-            eventName,
-            payload,
-            previousAnimationEvent > 0 ? now - previousAnimationEvent : -1,
-            ToString(state.load()),
-            ToString(activeDefeatCause.load()),
-            ToString(activeRecoveryMode.load()),
-            owner ? owner->GetActorValue(RE::ActorValue::kHealth) : -1.0F,
-            player ? static_cast<int>(player->GetLifeState()) : -1,
-            actorState ? static_cast<int>(actorState->GetKnockState()) : -1,
-            IsAlreadyRagdolled(player),
-            player && player->IsInMidair(),
-            controller != nullptr,
-            controller && controller->GetHavokWorld(),
-            controller ? controller->flags.underlying() : 0U,
-            controller ? static_cast<int>(controller->context.currentState) : -1,
-            controller ? static_cast<int>(controller->wantState) : -1,
-            controller ? controller->supportCount : -1);
+    std::string_view,
+    std::uintptr_t) {
+    if (IsDamageBlocked()) {
+        RepairBlockedPlayerHealth(RE::PlayerCharacter::GetSingleton());
     }
-
-    if (normalizedEvent.starts_with("jumpfall")) {
-        lastFallEventMilliseconds.store(now);
-        lastLandingEventMilliseconds.store(0);
-        if (!fallSequenceActive.exchange(true)) {
-            const auto generation = fallGeneration.fetch_add(1) + 1;
-            logger::debug(
-                "Player fall sequence {} started from {}.",
-                generation,
-                eventName);
-        }
-    } else if (normalizedEvent.starts_with("jumpland") || normalizedEvent == "jumpdown") {
-        const bool wasFalling = fallSequenceActive.exchange(false);
-        lastLandingEventMilliseconds.store(now);
-        if (wasFalling) {
-            logger::debug(
-                "Player fall sequence {} landed through {}.",
-                fallGeneration.load(),
-                eventName);
-        }
-    }
-
     const auto currentState = state.load();
 
     if (currentState == DeathState::Resolving && awaitingRagdollRecovery.load()) {
@@ -1685,9 +1146,8 @@ void DeathManager::HandlePlayerAnimationEvent(
         const bool getUpFinished = eventName == "GetUpEnd" || eventName == "GetUpExit";
         if (getUpStarted || controllerAdded || getUpFinished) {
             const auto generation = defeatGeneration.load();
-            const std::string eventCopy(eventName);
             SKSE::GetTaskInterface()->AddTask(
-                [generation, eventCopy, getUpStarted, controllerAdded, getUpFinished] {
+                [generation, getUpStarted, controllerAdded, getUpFinished] {
                 if (generation != defeatGeneration.load() ||
                     state.load() != DeathState::Resolving ||
                     !awaitingRagdollRecovery.load()) {
@@ -1703,7 +1163,6 @@ void DeathManager::HandlePlayerAnimationEvent(
                 if (getUpFinished) {
                     recoveryGetUpFinished.store(true);
                 }
-                logger::info("Observed player ragdoll recovery event '{}'.", eventCopy);
 
                 if (recoveryControllerAdded.load() && recoveryGetUpFinished.load()) {
                     ScheduleRagdollRecoveryCompletion(
@@ -1738,19 +1197,17 @@ void DeathManager::HandlePlayerAnimationEvent(
     }
 
     const auto generation = defeatGeneration.load();
-    const std::string eventCopy(eventName);
-    SKSE::GetTaskInterface()->AddTask([generation, eventCopy] {
-        logger::info("Player animation event '{}' completed the pending killmove.", eventCopy);
+    SKSE::GetTaskInterface()->AddTask([generation] {
         FinalizePendingKillMove(generation, false);
     });
 }
 
 bool DeathManager::IsDamageBlocked() {
-    return state.load() != DeathState::Alive;
+    return damageProtectionActive.load() || state.load() != DeathState::Alive;
 }
 
 void DeathManager::RepairBlockedPlayerHealth(RE::PlayerCharacter* player) {
-    if (!player || state.load() == DeathState::Alive) {
+    if (!player || !IsDamageBlocked()) {
         return;
     }
     auto owner = player->AsActorValueOwner();
@@ -1759,21 +1216,72 @@ void DeathManager::RepairBlockedPlayerHealth(RE::PlayerCharacter* player) {
     }
 
     const float before = owner->GetActorValue(RE::ActorValue::kHealth);
-    if (std::isfinite(before) && before >= 1.0F) {
+    const float minimum = std::max(1.0F, protectedHealth.load());
+    if (std::isfinite(before) && before >= minimum) {
         return;
     }
-    SetCurrentActorValue(owner, RE::ActorValue::kHealth, 1.0F);
+    SetCurrentActorValue(owner, RE::ActorValue::kHealth, minimum);
     logger::warn(
         "Repaired player health after blocked post-applied damage: before={}, after={}; "
-        "state={}, cause={}.",
+        "state={}, cause={}, protectedHealth={}.",
         before,
         owner->GetActorValue(RE::ActorValue::kHealth),
         ToString(state.load()),
-        ToString(activeDefeatCause.load()));
+        ToString(activeDefeatCause.load()),
+        minimum);
 }
 
 bool DeathManager::IsMenuOpen() {
     return state.load() == DeathState::Defeated;
+}
+
+std::string DeathManager::GetBackgroundText() {
+    std::string fallback;
+    {
+        std::scoped_lock lock(presentationLock);
+        fallback = activeBackgroundTemplate;
+    }
+    return TextManager::ResolveSlot("background_text", fallback);
+}
+
+DeathManager::DebugInfo DeathManager::GetDebugInfo() {
+    DebugInfo info;
+    info.damageProtectionActive = damageProtectionActive.load();
+    info.ghostCaptured = ghostCaptured;
+    info.playerWasGhost = playerWasGhost;
+    info.protectedHealth = protectedHealth.load();
+    const auto deadline = damageProtectionDeadlineMilliseconds.load();
+    info.protectionRemainingMilliseconds = !info.damageProtectionActive ? 0 :
+        deadline <= 0 ? -1 : std::max<std::int64_t>(0, deadline - GetSteadyMilliseconds());
+    info.state = ToString(state.load());
+    info.physicalCause = ToString(activeDefeatCause.load());
+    info.presentationCause = ToString(activeDeathTextCause.load());
+    {
+        std::scoped_lock lock(presentationLock);
+        info.backgroundTemplate = activeBackgroundTemplate;
+    }
+    return info;
+}
+
+bool DeathManager::DebugSelectDeathTextCause(std::string_view cause) {
+    DeathTextCause selected;
+    if (cause == "generic") {
+        selected = DeathTextCause::Generic;
+    } else if (cause == "fall") {
+        selected = DeathTextCause::Fall;
+    } else if (cause == "sword") {
+        selected = DeathTextCause::Sword;
+    } else if (cause == "magic") {
+        selected = DeathTextCause::Magic;
+    } else {
+        return false;
+    }
+    activeDeathTextCause.store(selected);
+    TextManager::SetRuntimeVariable("death.cause", ToString(selected));
+    TextManager::SetRuntimeVariable("death.count", std::to_string(DeathTrackerManager::GetCount()));
+    SelectBackgroundTemplate(selected);
+    Prisma::ApplyUISettings();
+    return true;
 }
 
 void DeathManager::HandleUIAction(std::string_view action) {
@@ -1785,12 +1293,28 @@ void DeathManager::HandleUIAction(std::string_view action) {
             RespawnPlayer(Respawn::Option::LastSleep);
         } else if (actionCopy == "respawn_here") {
             RespawnPlayer(Respawn::Option::Here);
-        } else if (actionCopy == "load_last_save") {
-            LoadLastSave();
+        } else if (actionCopy == "reload_save" || actionCopy == "load_last_save") {
+            ReloadCurrentSave();
         } else {
             logger::warn("Rejected unknown death menu action: {}", actionCopy);
         }
     });
+}
+
+void DeathManager::OnGameLoadFinished(bool success) {
+    if (success) {
+        Reset();
+        return;
+    }
+    auto expected = DeathState::LoadingSave;
+    if (!state.compare_exchange_strong(expected, DeathState::Defeated)) {
+        return;
+    }
+    logger::warn("Reload Save failed; restoring the defeated menu for another selection.");
+    ApplyTemporaryGhost(RE::PlayerCharacter::GetSingleton());
+    CaptureAndDisableControls();
+    Prisma::ShowDeathMenu(activeRespawnMask.load());
+    Prisma::ShowError("Could not reload the current save.");
 }
 
 void DeathManager::Reset() {
@@ -1803,29 +1327,22 @@ void DeathManager::Reset() {
     adoptPendingNativeRagdoll.store(false);
     activeRespawnMask.store(0);
     activeRespawnOption.store(Respawn::Option::None);
-    TextManager::ClearRuntimeVariables();
-    fallSequenceActive.store(false);
-    lastFallEventMilliseconds.store(0);
-    lastLandingEventMilliseconds.store(0);
-    ClearAppliedDamageContexts();
-    lastDiagnosticAnimationMilliseconds.store(0);
-    activeLethalHitTrace.store(0);
-    lethalHitTraceStartMilliseconds.store(0);
-    lethalHitTraceDeadlineMilliseconds.store(0);
-    lethalHitTraceLogSequence.store(0);
-    lastLethalHitTraceAnimationMilliseconds.store(0);
+    activeDeathTextCause.store(DeathTextCause::Generic);
     {
-        std::scoped_lock lock(animationPreRollLock);
-        animationPreRoll.clear();
+        std::scoped_lock lock(presentationLock);
+        activeBackgroundTemplate.clear();
+        activeDeathSourceName.clear();
     }
+    TextManager::ClearRuntimeVariables();
+    ClearAppliedDamageContexts();
     killMoveAttacker.reset();
     activeDefeatCause.store(DefeatCause::None);
     const auto previousRecoveryMode = activeRecoveryMode.exchange(DefeatRecoveryMode::None);
     Prisma::Hide();
     const auto previousState = state.exchange(DeathState::Alive);
     auto player = RE::PlayerCharacter::GetSingleton();
-    RestoreTemporaryGhost(player);
-    if (player && previousRecoveryMode == DefeatRecoveryMode::MoreRagdoll) {
+    EndDamageProtection(player, "DeathManager reset");
+    if (player && previousRecoveryMode == DefeatRecoveryMode::Ragdoll) {
         MoreRagdollClient::Disable(player);
     }
     if (player && previousState != DeathState::Alive) {

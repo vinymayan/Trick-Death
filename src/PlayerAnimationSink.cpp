@@ -1,6 +1,7 @@
 #include "PlayerAnimationSink.h"
 
 #include "DeathManager.h"
+#include "DeathTrackerManager.h"
 #include "DelayedDispatcher.h"
 
 #include <chrono>
@@ -71,15 +72,12 @@ void PlayerAnimationSink::ScheduleRegistration(std::uint32_t attempt) {
                     static_cast<RE::BSTEventSource<RE::BSAnimationGraphEvent>*>(graph.get());
                 eventSource->RemoveEventSink(sink);
                 eventSource->AddEventSink(sink);
-                logger::info(
-                    "Player animation sink attached graphIndex={} graphSource=0x{:X}.",
-                    attachedGraphs,
-                    reinterpret_cast<std::uintptr_t>(eventSource));
                 ++attachedGraphs;
             }
 
             if (attachedGraphs > 0) {
                 logger::info("Player animation sink attached to {} graph(s).", attachedGraphs);
+                DeathTrackerManager::ScheduleGraphSync();
             } else {
                 logger::warn("Player animation sink registration was rejected; retrying.");
                 sink->ScheduleRegistration(attempt + 1);
@@ -125,6 +123,7 @@ RE::BSEventNotifyControl PlayerAnimationSink::ProcessEvent(
     const auto player = RE::PlayerCharacter::GetSingleton();
     if (player && event->formID == player->GetFormID()) {
         Reconnect();
+        DeathTrackerManager::ScheduleGraphSync();
     }
     return RE::BSEventNotifyControl::kContinue;
 }

@@ -3,6 +3,9 @@
 #include "SKSEMCP/SKSEMenuFramework.hpp"
 
 #include "CheckpointManager.h"
+#include "CurrentSaveManager.h"
+#include "DeathManager.h"
+#include "DeathTrackerManager.h"
 #include "Prisma.h"
 #include "RespawnPolicyManager.h"
 #include "TextManager.h"
@@ -13,7 +16,7 @@
 
 namespace {
     struct DebugState {
-        char checkpointName[256]{ "API Debug checkpoint" };
+        char checkpointName[256]{ "Debug checkpoint" };
         std::uint32_t checkpointBlockedMask{ 0 };
 
         int policyScope{ 0 };
@@ -26,7 +29,7 @@ namespace {
         bool textPersistent{ false };
 
         char variableKey[128]{ "debug.text" };
-        char variableValue[512]{ "API Debug" };
+        char variableValue[512]{ "Debug" };
         bool variablePersistent{ false };
 
         std::string status{ "Ready. Debug calls use the player reference as their owner form." };
@@ -34,16 +37,17 @@ namespace {
 
     DebugState debug;
 
-    constexpr std::array<const char*, 9> TEXT_SLOTS{
+    constexpr std::array<const char*, 10> TEXT_SLOTS{
         "title",
+        "background_text",
         "respawn_here",
         "respawn_last_sleep",
         "respawn_checkpoint",
-        "load_last_save",
+        "reload_save",
         "unavailable_here",
         "unavailable_last_sleep",
         "unavailable_checkpoint",
-        "unavailable_load"
+        "unavailable_reload"
     };
 
     void MaskCheckbox(const char* label, std::uint32_t& mask, std::uint32_t flag) {
@@ -57,14 +61,16 @@ namespace {
         }
     }
 
-    void RenderActionMask(std::uint32_t& mask, bool includeDisable) {
+    void RenderActionMask(const char* id, std::uint32_t& mask, bool includeDisable) {
+        ImGui::PushID(id);
         MaskCheckbox("Respawn here", mask, TRICK_DEATH_API::kRespawnHere);
         MaskCheckbox("Last place slept", mask, TRICK_DEATH_API::kLastSleep);
         MaskCheckbox("Last external checkpoint", mask, TRICK_DEATH_API::kLastCheckpoint);
-        MaskCheckbox("Load last save", mask, TRICK_DEATH_API::kLoadLastSave);
+        MaskCheckbox("Reload current save", mask, TRICK_DEATH_API::kReloadSave);
         if (includeDisable) {
             MaskCheckbox("Disable Trick Death entirely", mask, TRICK_DEATH_API::kDisableTrickDeath);
         }
+        ImGui::PopID();
     }
 
     RE::TESForm* ResolvePolicyArea(RE::PlayerCharacter* player) {
@@ -107,6 +113,10 @@ void APIDebugMenu::Render() {
         api->HasLastSleep() ? "true" : "false",
         api->HasCheckpoint() ? "true" : "false",
         available);
+    const auto currentSave = CurrentSaveManager::GetCurrentSaveName();
+    ImGui::TextWrapped(
+        "Reload Save target: %s",
+        currentSave.empty() ? "unavailable (New Game or current save deleted)" : currentSave.c_str());
     ImGui::TextWrapped("Status: %s", debug.status.c_str());
     ImGui::Separator();
 
@@ -114,8 +124,9 @@ void APIDebugMenu::Render() {
         ImGui::InputText("Checkpoint name", debug.checkpointName, std::size(debug.checkpointName));
         ImGui::TextUnformatted("Checkpoint-provided blocked mask:");
         ImGui::Indent();
-        RenderActionMask(debug.checkpointBlockedMask, false);
+        RenderActionMask("checkpoint-blocked-mask", debug.checkpointBlockedMask, false);
         ImGui::Unindent();
+        ImGui::Text("Checkpoint draft blocked mask: 0x%02X", debug.checkpointBlockedMask);
 
         if (ImGui::Button("Set checkpoint at player")) {
             TRICK_DEATH_API::CheckpointRequest request;
@@ -155,9 +166,30 @@ void APIDebugMenu::Render() {
         }
         ImGui::TextUnformatted("Blocked mask (deny wins):");
         ImGui::Indent();
-        RenderActionMask(debug.policyBlockedMask, true);
+        RenderActionMask("policy-blocked-mask", debug.policyBlockedMask, true);
         ImGui::Unindent();
         ImGui::Checkbox("Persist policy in co-save", std::addressof(debug.policyPersistent));
+
+        const auto policySnapshot = RespawnPolicyManager::GetPolicies();
+        const auto areaID = area ? area->GetFormID() : 0;
+        std::uint32_t appliedPolicyMask = 0;
+        bool appliedPolicyPersistent = false;
+        bool hasAppliedPolicy = false;
+        for (const auto& policy : policySnapshot) {
+            if (policy.ownerFormID == player->GetFormID() && policy.areaFormID == areaID) {
+                appliedPolicyMask = policy.blockedMask;
+                appliedPolicyPersistent = policy.persistent;
+                hasAppliedPolicy = true;
+                break;
+            }
+        }
+        ImGui::Text(
+            "Draft mask: 0x%02X | Applied debug policy: %s0x%02X | persistent=%s",
+            debug.policyBlockedMask,
+            hasAppliedPolicy ? "" : "none / ",
+            appliedPolicyMask,
+            appliedPolicyPersistent ? "true" : "false");
+        ImGui::TextUnformatted("Checkboxes edit the draft; use Set/replace to call the API.");
 
         if (ImGui::Button("Set/replace selected policy")) {
             if (!HasSelectedArea(player)) {
@@ -188,14 +220,14 @@ void APIDebugMenu::Render() {
                     "ClearRespawnPolicy returned false (no matching debug policy).";
             }
         }
-        if (ImGui::Button("Clear every policy owned by API Debug")) {
+        if (ImGui::Button("Clear every policy owned by Debug")) {
             const auto removed = RespawnPolicyManager::ClearPolicies(player);
-            debug.status = fmt::format("Removed {} API Debug policy entries.", removed);
+            debug.status = fmt::format("Removed {} Debug policy entries.", removed);
         }
         ImGui::Text(
             "Current result after policies: available=0x%02X, active policies=%zu",
             api->GetAvailableRespawns(),
-            RespawnPolicyManager::GetPolicies().size());
+            policySnapshot.size());
     }
 
     if (ImGui::CollapsingHeader("Text templates and variables", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -235,9 +267,9 @@ void APIDebugMenu::Render() {
             RefreshMenuText();
         }
         ImGui::SameLine();
-        if (ImGui::Button("Clear all API Debug text data")) {
+        if (ImGui::Button("Clear all Debug text data")) {
             const auto removed = api->ClearTextOverrides(player);
-            debug.status = fmt::format("Removed {} API Debug text overrides/variables.", removed);
+            debug.status = fmt::format("Removed {} Debug text overrides/variables.", removed);
             RefreshMenuText();
         }
 
@@ -245,7 +277,69 @@ void APIDebugMenu::Render() {
             TEXT_SLOTS[debug.textSlot],
             "<localized default; no active override>");
         ImGui::TextWrapped("Resolved slot preview: %s", preview.c_str());
-        ImGui::TextUnformatted("Supported variables include {$player.name}, {$killer.name}, {$death.location}, {$last_sleep.name}, and {$checkpoint.name}.");
+        ImGui::TextUnformatted("Supported variables include {$player.name}, {$killer.name}, {$death.location}, {$death.cause}, {$death.weapon}, {$death.magic}, {$death.count}, {$last_sleep.name}, and {$checkpoint.name}.");
+    }
+
+    if (ImGui::CollapsingHeader("Damage protection and death presentation", ImGuiTreeNodeFlags_DefaultOpen)) {
+        const auto info = DeathManager::GetDebugInfo();
+        ImGui::Text(
+            "State=%s | protected=%s | remaining=%lld ms",
+            info.state.c_str(),
+            info.damageProtectionActive ? "true" : "false",
+            static_cast<long long>(info.protectionRemainingMilliseconds));
+        ImGui::Text(
+            "Ghost captured=%s | originally ghost=%s | protected health=%.2f",
+            info.ghostCaptured ? "true" : "false",
+            info.playerWasGhost ? "true" : "false",
+            info.protectedHealth);
+        ImGui::Text(
+            "Physical cause=%s | presentation cause=%s",
+            info.physicalCause.c_str(),
+            info.presentationCause.c_str());
+        ImGui::TextWrapped("Background template: %s", info.backgroundTemplate.c_str());
+        ImGui::TextWrapped("Resolved background: %s", DeathManager::GetBackgroundText().c_str());
+
+        for (const auto* cause : { "generic", "fall", "sword", "magic" }) {
+            ImGui::PushID(cause);
+            if (ImGui::Button(fmt::format("Preview {}", cause).c_str())) {
+                DeathManager::DebugSelectDeathTextCause(cause);
+                debug.status = fmt::format("Selected '{}' death-message preview.", cause);
+            }
+            ImGui::SameLine();
+            ImGui::PopID();
+        }
+        ImGui::NewLine();
+    }
+
+    if (ImGui::CollapsingHeader("DeathTracker graph statistic", ImGuiTreeNodeFlags_DefaultOpen)) {
+        std::int32_t graphValue = -1;
+        const bool graphReadable = player->GetGraphVariableInt(
+            DeathTrackerManager::GRAPH_VARIABLE,
+            graphValue);
+        ImGui::Text(
+            "Co-save value=%d | graph readable=%s | graph value=%d",
+            DeathTrackerManager::GetCount(),
+            graphReadable ? "true" : "false",
+            graphValue);
+        if (ImGui::Button("Increment DeathTracker")) {
+            DeathTrackerManager::RecordDeath(player);
+            debug.status = "DeathTracker incremented and graph synchronization requested.";
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Reset DeathTracker")) {
+            DeathTrackerManager::SetCountForDebug(0);
+            debug.status = "DeathTracker reset to zero.";
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Resync DeathTracker graph")) {
+            const bool result = DeathTrackerManager::SyncGraph(player);
+            if (!result) {
+                DeathTrackerManager::ScheduleGraphSync();
+            }
+            debug.status = result ?
+                "DeathTracker graph synchronized." :
+                "Immediate graph sync failed; retry scheduled.";
+        }
     }
 
     ImGui::Separator();

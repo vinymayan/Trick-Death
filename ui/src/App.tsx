@@ -1,13 +1,12 @@
 import { onMount, Show, createSignal } from 'solid-js';
 import './app.css';
 import { availableRespawns, errorMessage, settings, visible } from './bridge';
-
-type DeathAction = 'respawn_checkpoint' | 'respawn_last_sleep' | 'respawn_here' | 'load_last_save';
+import type { DeathAction } from './bridge';
 
 const RESPAWN_HERE = 1;
 const LAST_SLEEP = 2;
 const LAST_CHECKPOINT = 4;
-const LOAD_LAST_SAVE = 8;
+const RELOAD_SAVE = 8;
 
 const supportedBackgroundExtensions = ['svg', 'png', 'webp', 'jpg', 'jpeg', 'gif', 'avif'];
 
@@ -34,6 +33,21 @@ function dispatchAction(action: DeathAction) {
     if (typeof window.deathMenuAction === 'function') {
         window.deathMenuAction(action);
     }
+}
+
+function actionStyle(action: DeathAction) {
+    const style = settings().actionStyles[action];
+    const buttonScale = style.buttonScalePercent / 100;
+    const textScale = style.textSizePercent / 100;
+    return [
+        `--button-min-height:${62 * buttonScale}px`,
+        `--button-padding-y:${8 * buttonScale}px`,
+        `--button-padding-x:${18 * buttonScale}px`,
+        `--button-side-column:${54 * buttonScale}px`,
+        `--button-width:${Math.min(150, style.buttonScalePercent)}%`,
+        `--button-font-size:${21 * textScale}px`,
+        `--button-index-size:${16 * textScale}px`,
+    ].join(';');
 }
 
 function App() {
@@ -64,44 +78,61 @@ function App() {
                     style={{ transform: `scale(${settings().scalePercent / 100})` }}
                 >
                     <div class="death-rule" />
-                    <h1 id="death-title">{settings().labels.title}</h1>
+                    <h1
+                        id="death-title"
+                        style={`font-size:clamp(${44 * settings().titleTextSizePercent / 100}px,${7 * settings().titleTextSizePercent / 100}vw,${92 * settings().titleTextSizePercent / 100}px)`}
+                    >
+                        {settings().labels.title}
+                    </h1>
+                    <Show when={settings().labels.backgroundText}>
+                        <p
+                            class="death-message"
+                            style={`font-size:${18 * settings().backgroundTextSizePercent / 100}px`}
+                        >
+                            {settings().labels.backgroundText}
+                        </p>
+                    </Show>
                     <div class="death-actions">
-                        <button
-                            class="death-action"
-                            disabled={(availableRespawns() & RESPAWN_HERE) === 0}
-                            title={(availableRespawns() & RESPAWN_HERE) === 0 ? settings().labels.unavailableHere : ''}
-                            onClick={() => dispatchAction('respawn_here')}
-                        >
-                            <span class="action-index">I</span>
-                            <span>{settings().labels.respawn}</span>
-                        </button>
-                        <button
-                            class="death-action"
-                            disabled={(availableRespawns() & LAST_SLEEP) === 0}
-                            title={(availableRespawns() & LAST_SLEEP) === 0 ? settings().labels.unavailableLastSleep : ''}
-                            onClick={() => dispatchAction('respawn_last_sleep')}
-                        >
-                            <span class="action-index">II</span>
-                            <span>{settings().labels.lastSleep}</span>
-                        </button>
-                        <button
-                            class="death-action"
-                            disabled={(availableRespawns() & LAST_CHECKPOINT) === 0}
-                            title={(availableRespawns() & LAST_CHECKPOINT) === 0 ? settings().labels.unavailableCheckpoint : ''}
-                            onClick={() => dispatchAction('respawn_checkpoint')}
-                        >
-                            <span class="action-index">III</span>
-                            <span>{settings().labels.checkpoint}</span>
-                        </button>
-                        <button
-                            class="death-action"
-                            disabled={(availableRespawns() & LOAD_LAST_SAVE) === 0}
-                            title={(availableRespawns() & LOAD_LAST_SAVE) === 0 ? settings().labels.unavailableLoad : ''}
-                            onClick={() => dispatchAction('load_last_save')}
-                        >
-                            <span class="action-index">IV</span>
-                            <span>{settings().labels.load}</span>
-                        </button>
+                        <Show when={(availableRespawns() & RESPAWN_HERE) !== 0}>
+                            <button
+                                class="death-action"
+                                style={actionStyle('respawn_here')}
+                                onClick={() => dispatchAction('respawn_here')}
+                            >
+                                <span class="action-index">I</span>
+                                <span>{settings().labels.respawn}</span>
+                            </button>
+                        </Show>
+                        <Show when={(availableRespawns() & LAST_SLEEP) !== 0}>
+                            <button
+                                class="death-action"
+                                style={actionStyle('respawn_last_sleep')}
+                                onClick={() => dispatchAction('respawn_last_sleep')}
+                            >
+                                <span class="action-index">II</span>
+                                <span>{settings().labels.lastSleep}</span>
+                            </button>
+                        </Show>
+                        <Show when={(availableRespawns() & LAST_CHECKPOINT) !== 0}>
+                            <button
+                                class="death-action"
+                                style={actionStyle('respawn_checkpoint')}
+                                onClick={() => dispatchAction('respawn_checkpoint')}
+                            >
+                                <span class="action-index">III</span>
+                                <span>{settings().labels.checkpoint}</span>
+                            </button>
+                        </Show>
+                        <Show when={(availableRespawns() & RELOAD_SAVE) !== 0}>
+                            <button
+                                class="death-action"
+                                style={actionStyle('reload_save')}
+                                onClick={() => dispatchAction('reload_save')}
+                            >
+                                <span class="action-index">IV</span>
+                                <span>{settings().labels.reload}</span>
+                            </button>
+                        </Show>
                     </div>
                     <Show when={errorMessage()}>
                         <p class="death-error" role="alert">{errorMessage()}</p>

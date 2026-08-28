@@ -36,6 +36,16 @@
     line-height: 1;
 }
 
+.death-message {
+    max-width: 700px;
+    margin: -16px auto 28px;
+    color: #c8c0b4;
+    font-size: 18px;
+    font-style: italic;
+    line-height: 1.45;
+    text-wrap: balance;
+}
+
 .death-rule {
     width: 68%;
     height: 1px;
@@ -50,20 +60,23 @@
 .death-actions {
     display: flex;
     flex-direction: column;
+    align-items: center;
     gap: 12px;
 }
 
 .death-action {
     display: grid;
-    grid-template-columns: 54px 1fr 54px;
+    grid-template-columns: var(--button-side-column, 54px) 1fr var(--button-side-column, 54px);
     align-items: center;
-    min-height: 62px;
-    padding: 8px 18px;
+    width: var(--button-width, 100%);
+    max-width: 95vw;
+    min-height: var(--button-min-height, 62px);
+    padding: var(--button-padding-y, 8px) var(--button-padding-x, 18px);
     border: 1px solid #766d61;
     background: rgba(12, 13, 14, 0.86);
     color: #e7e0d4;
     font: inherit;
-    font-size: 21px;
+    font-size: var(--button-font-size, 21px);
     letter-spacing: 0.035em;
     cursor: pointer;
 }
@@ -95,7 +108,7 @@
 .action-index {
     justify-self: start;
     color: #a91418;
-    font-size: 16px;
+    font-size: var(--button-index-size, 16px);
 }
 
 .checkpoint-warning,

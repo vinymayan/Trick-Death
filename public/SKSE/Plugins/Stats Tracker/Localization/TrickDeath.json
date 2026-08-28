@@ -1,0 +1,10 @@
+{
+  "trick_death": {
+    "stats": {
+      "deaths": {
+        "name": "Deaths",
+        "description": "Defeats intercepted by Trick Death in this playthrough."
+      }
+    }
+  }
+}

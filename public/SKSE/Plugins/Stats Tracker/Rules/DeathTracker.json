@@ -1,0 +1,11 @@
+{
+  "id": "DeathTracker",
+  "ruleType": 1,
+  "attachedGlobID": "",
+  "graphType": 1,
+  "floatFormat": 0,
+  "name": "{{$trick_death.stats.deaths.name}}",
+  "description": "{{$trick_death.stats.deaths.description}}",
+  "category": "General",
+  "graphVarName": "DeathTracker"
+}

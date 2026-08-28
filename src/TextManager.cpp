@@ -10,16 +10,17 @@
 namespace {
     constexpr std::uint32_t MAX_ITEMS = 2048;
     constexpr std::uint32_t MAX_STRING = 4096;
-    constexpr std::array<std::string_view, 9> VALID_SLOTS{
+    constexpr std::array<std::string_view, 10> VALID_SLOTS{
         "title",
+        "background_text",
         "respawn_here",
         "respawn_last_sleep",
         "respawn_checkpoint",
-        "load_last_save",
+        "reload_save",
         "unavailable_here",
         "unavailable_last_sleep",
         "unavailable_checkpoint",
-        "unavailable_load"
+        "unavailable_reload"
     };
 
     std::mutex textLock;
@@ -30,10 +31,12 @@ namespace {
 
     std::string NormalizeSlot(std::string_view slot) {
         if (slot == "defeated") return "title";
+        if (slot == "background" || slot == "death_message") return "background_text";
         if (slot == "respawn" || slot == "here") return "respawn_here";
         if (slot == "last_sleep") return "respawn_last_sleep";
         if (slot == "checkpoint") return "respawn_checkpoint";
-        if (slot == "load") return "load_last_save";
+        if (slot == "load" || slot == "load_last_save") return "reload_save";
+        if (slot == "unavailable_load") return "unavailable_reload";
         return std::string(slot);
     }
 

@@ -19,6 +19,43 @@ namespace {
             RE::TESForm::LookupByID<RE::TESObjectREFR>(destination.markerFormID) : nullptr;
     }
 
+    bool MovePlayerToDestination(
+        std::string_view kind,
+        const CheckpointManager::DestinationInfo& destination)
+    {
+        RE::ObjectRefHandle markerHandle;
+        {
+        std::scoped_lock lock(destinationLock);
+        auto* marker = ResolveMarker(destination);
+            if (!marker) {
+                logger::warn(
+                    "Could not move player to {}: active={}, marker={:08X}, cell={:08X}, "
+                    "location={:08X}; the marker could not be resolved.",
+                    kind,
+                    destination.active,
+                    destination.markerFormID,
+                    destination.cellFormID,
+                    destination.locationFormID);
+                return false;
+            }
+            markerHandle = marker->GetHandle();
+        }
+
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        const auto marker = markerHandle.get();
+        if (!player || !marker) {
+            logger::warn(
+                "Could not move player to {}: playerAvailable={}, markerHandleResolved={}.",
+                kind,
+                player != nullptr,
+                marker != nullptr);
+            return false;
+        }
+
+        player->MoveTo(marker.get());
+        return true;
+    }
+
     std::string GetDestinationName(RE::TESObjectREFR* anchor, std::string requestedName) {
         if (!requestedName.empty()) {
             return requestedName.substr(0, MAX_NAME_LENGTH);
@@ -192,7 +229,6 @@ void CheckpointManager::CaptureAfterSleep() {
         }
         updated = lastSleep;
     }
-    logger::info("Last-sleep destination updated: {:08X}", updated.markerFormID);
     IntegrationEvents::SendLastSleepChanged(updated.markerFormID, updated.name);
 }
 
@@ -214,11 +250,6 @@ bool CheckpointManager::SetCheckpoint(
         }
         updated = checkpoint;
     }
-    logger::info(
-        "External checkpoint overwritten: marker={:08X}, owner={:08X}, name='{}'.",
-        updated.markerFormID,
-        updated.ownerFormID,
-        updated.name);
     IntegrationEvents::SendCheckpointChanged(updated.markerFormID, updated.ownerFormID, updated.name);
     return true;
 }
@@ -251,25 +282,11 @@ bool CheckpointManager::HasCheckpoint() {
 }
 
 bool CheckpointManager::MovePlayerToLastSleep() {
-    std::scoped_lock lock(destinationLock);
-    auto player = RE::PlayerCharacter::GetSingleton();
-    auto marker = ResolveMarker(lastSleep);
-    if (!player || !marker) {
-        return false;
-    }
-    player->MoveTo(marker);
-    return true;
+    return MovePlayerToDestination("last-sleep destination", lastSleep);
 }
 
 bool CheckpointManager::MovePlayerToCheckpoint() {
-    std::scoped_lock lock(destinationLock);
-    auto player = RE::PlayerCharacter::GetSingleton();
-    auto marker = ResolveMarker(checkpoint);
-    if (!player || !marker) {
-        return false;
-    }
-    player->MoveTo(marker);
-    return true;
+    return MovePlayerToDestination("external checkpoint", checkpoint);
 }
 
 CheckpointManager::DestinationInfo CheckpointManager::GetLastSleepInfo() {

@@ -19,6 +19,7 @@ namespace {
 
     std::string BuildSettingsPayload() {
         const auto title = TextManager::ResolveSlot("title", ModMenu::GetLoc("ui.title", "DEFEATED"));
+        const auto backgroundText = DeathManager::GetBackgroundText();
         const auto lastSleep = TextManager::ResolveSlot(
             "respawn_last_sleep",
             ModMenu::GetLoc("ui.last_sleep", "Respawn at last place slept"));
@@ -28,9 +29,9 @@ namespace {
         const auto respawnHere = TextManager::ResolveSlot(
             "respawn_here",
             ModMenu::GetLoc("ui.respawn", "Respawn here"));
-        const auto load = TextManager::ResolveSlot(
-            "load_last_save",
-            ModMenu::GetLoc("ui.load", "Load last save"));
+        const auto reload = TextManager::ResolveSlot(
+            "reload_save",
+            ModMenu::GetLoc("ui.reload", "Reload save"));
         const auto unavailableHere = TextManager::ResolveSlot(
             "unavailable_here",
             ModMenu::GetLoc("ui.unavailable_here", "Respawn here is blocked"));
@@ -40,9 +41,9 @@ namespace {
         const auto unavailableCheckpoint = TextManager::ResolveSlot(
             "unavailable_checkpoint",
             ModMenu::GetLoc("ui.unavailable_checkpoint", "No available external checkpoint"));
-        const auto unavailableLoad = TextManager::ResolveSlot(
-            "unavailable_load",
-            ModMenu::GetLoc("ui.unavailable_load", "Loading the last save is blocked"));
+        const auto unavailableReload = TextManager::ResolveSlot(
+            "unavailable_reload",
+            ModMenu::GetLoc("ui.unavailable_reload", "Reloading the current save is blocked"));
         rapidjson::StringBuffer buffer;
         rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
         writer.StartObject();
@@ -52,26 +53,48 @@ namespace {
         writer.Int(Settings::UI.backgroundBlurPixels);
         writer.Key("scalePercent");
         writer.Int(Settings::UI.scalePercent);
+        writer.Key("titleTextSizePercent");
+        writer.Int(Settings::UI.titleTextSizePercent);
+        writer.Key("backgroundTextSizePercent");
+        writer.Int(Settings::UI.backgroundTextSizePercent);
+        writer.Key("actionStyles");
+        writer.StartObject();
+        const auto writeActionStyle = [&](const char* key, const Settings::ActionStyle& style) {
+            writer.Key(key);
+            writer.StartObject();
+            writer.Key("textSizePercent");
+            writer.Int(style.textSizePercent);
+            writer.Key("buttonScalePercent");
+            writer.Int(style.buttonScalePercent);
+            writer.EndObject();
+        };
+        writeActionStyle("respawn_here", Settings::UI.respawnHere);
+        writeActionStyle("respawn_last_sleep", Settings::UI.lastSleep);
+        writeActionStyle("respawn_checkpoint", Settings::UI.lastCheckpoint);
+        writeActionStyle("reload_save", Settings::UI.reloadSave);
+        writer.EndObject();
         writer.Key("labels");
         writer.StartObject();
         writer.Key("title");
         writer.String(title.c_str());
+        writer.Key("backgroundText");
+        writer.String(backgroundText.c_str());
         writer.Key("lastSleep");
         writer.String(lastSleep.c_str());
         writer.Key("checkpoint");
         writer.String(checkpoint.c_str());
         writer.Key("respawn");
         writer.String(respawnHere.c_str());
-        writer.Key("load");
-        writer.String(load.c_str());
+        writer.Key("reload");
+        writer.String(reload.c_str());
         writer.Key("unavailableHere");
         writer.String(unavailableHere.c_str());
         writer.Key("unavailableLastSleep");
         writer.String(unavailableLastSleep.c_str());
         writer.Key("unavailableCheckpoint");
         writer.String(unavailableCheckpoint.c_str());
-        writer.Key("unavailableLoad");
-        writer.String(unavailableLoad.c_str());
+        writer.Key("unavailableReload");
+        writer.String(unavailableReload.c_str());
         writer.EndObject();
         writer.EndObject();
         return buffer.GetString();

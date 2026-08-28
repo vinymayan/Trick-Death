@@ -4,33 +4,58 @@ export type DeathMenuSettings = {
     backgroundOpacityPercent: number;
     backgroundBlurPixels: number;
     scalePercent: number;
+    titleTextSizePercent: number;
+    backgroundTextSizePercent: number;
+    actionStyles: Record<DeathAction, DeathActionStyle>;
     labels: {
         title: string;
+        backgroundText: string;
         lastSleep: string;
         checkpoint: string;
         respawn: string;
-        load: string;
+        reload: string;
         unavailableHere: string;
         unavailableLastSleep: string;
         unavailableCheckpoint: string;
-        unavailableLoad: string;
+        unavailableReload: string;
     };
+};
+
+export type DeathAction = 'respawn_checkpoint' | 'respawn_last_sleep' | 'respawn_here' | 'reload_save';
+
+export type DeathActionStyle = {
+    textSizePercent: number;
+    buttonScalePercent: number;
+};
+
+const defaultActionStyle: DeathActionStyle = {
+    textSizePercent: 100,
+    buttonScalePercent: 100,
 };
 
 const defaults: DeathMenuSettings = {
     backgroundOpacityPercent: 100,
     backgroundBlurPixels: 0,
     scalePercent: 100,
+    titleTextSizePercent: 100,
+    backgroundTextSizePercent: 100,
+    actionStyles: {
+        respawn_here: { ...defaultActionStyle },
+        respawn_last_sleep: { ...defaultActionStyle },
+        respawn_checkpoint: { ...defaultActionStyle },
+        reload_save: { ...defaultActionStyle },
+    },
     labels: {
         title: 'DEFEATED',
+        backgroundText: '',
         lastSleep: 'Respawn at last place slept',
         checkpoint: 'Respawn at last checkpoint',
         respawn: 'Respawn here',
-        load: 'Load last save',
+        reload: 'Reload save',
         unavailableHere: 'Respawn here is blocked',
         unavailableLastSleep: 'No available last-sleep destination',
         unavailableCheckpoint: 'No available external checkpoint',
-        unavailableLoad: 'Loading the last save is blocked',
+        unavailableReload: 'Reloading the current save is blocked',
     },
 };
 
@@ -62,6 +87,14 @@ window.applyDeathMenuSettings = (payload: string) => {
     setSettings({
         ...current,
         ...parsed,
+        actionStyles: {
+            ...current.actionStyles,
+            ...(parsed.actionStyles ?? {}),
+            respawn_here: { ...current.actionStyles.respawn_here, ...(parsed.actionStyles?.respawn_here ?? {}) },
+            respawn_last_sleep: { ...current.actionStyles.respawn_last_sleep, ...(parsed.actionStyles?.respawn_last_sleep ?? {}) },
+            respawn_checkpoint: { ...current.actionStyles.respawn_checkpoint, ...(parsed.actionStyles?.respawn_checkpoint ?? {}) },
+            reload_save: { ...current.actionStyles.reload_save, ...(parsed.actionStyles?.reload_save ?? {}) },
+        },
         labels: { ...current.labels, ...(parsed.labels ?? {}) },
     });
 };

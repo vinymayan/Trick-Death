@@ -8,7 +8,8 @@ namespace Respawn {
         Here = 1U << 0,
         LastSleep = 1U << 1,
         LastCheckpoint = 1U << 2,
-        LoadLastSave = 1U << 3,
+        ReloadSave = 1U << 3,
+        LoadLastSave = ReloadSave,  // compatibility alias for API v1 integrations
         DisableTrickDeath = 1U << 4
     };
 
@@ -16,7 +17,7 @@ namespace Respawn {
         static_cast<std::uint32_t>(Option::Here) |
         static_cast<std::uint32_t>(Option::LastSleep) |
         static_cast<std::uint32_t>(Option::LastCheckpoint) |
-        static_cast<std::uint32_t>(Option::LoadLastSave);
+        static_cast<std::uint32_t>(Option::ReloadSave);
     inline constexpr std::uint32_t POLICY_MASK =
         ACTION_MASK | static_cast<std::uint32_t>(Option::DisableTrickDeath);
 
@@ -36,8 +37,8 @@ namespace Respawn {
             return "respawn_last_sleep";
         case Option::LastCheckpoint:
             return "respawn_checkpoint";
-        case Option::LoadLastSave:
-            return "load_last_save";
+        case Option::ReloadSave:
+            return "reload_save";
         case Option::DisableTrickDeath:
             return "disable_trick_death";
         case Option::None:
