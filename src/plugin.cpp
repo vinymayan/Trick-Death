@@ -18,6 +18,7 @@ namespace {
 
     void LoadTypedGameplaySettings(std::string_view reason) {
         ModMenu::RefreshGlobalList();
+        ModMenu::RefreshResourceList();
         ModMenu::LoadSettings();
         gameplaySettingsLoaded = true;
         logger::info("Gameplay settings loaded after {}.", reason);
@@ -83,7 +84,7 @@ void OnMessage(SKSE::MessagingInterface::Message* message) {
             ModMenu::Register(false);
             logger::info(
                 "Gameplay settings load is waiting for DynamicFormsGeneratorLoaded so dynamic "
-                "Global forms can be resolved.");
+                "Global and inventory resource forms can be resolved.");
         } else {
             ModMenu::Register(true);
             gameplaySettingsLoaded = true;

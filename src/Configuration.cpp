@@ -39,8 +39,30 @@ namespace {
         std::string label;
     };
 
+    struct ResourceOption {
+        RE::FormID formID{ 0 };
+        std::string editorID;
+        std::string normalizedFormID;
+        std::string name;
+        std::string pluginName;
+        std::string formType;
+        std::string label;
+        std::string searchText;
+    };
+
+    struct ResourcePickerState {
+        std::string search;
+        int pluginIndex{ 0 };
+        int typeIndex{ 0 };
+    };
+
     std::vector<GlobalOption> globalOptions;
+    std::vector<ResourceOption> resourceOptions;
+    std::vector<std::string> resourcePlugins{ "All" };
+    std::vector<std::string> resourceTypes{ "All" };
     std::map<std::string, std::string> globalSearchText;
+    std::map<std::string, ResourcePickerState> resourcePickerStates;
+    std::map<std::string, std::string> searchableComboFilters;
 
     const RE::TESFile* GetMasterFile(RE::TESForm* form) {
         if (!form) {
@@ -136,6 +158,14 @@ namespace {
         clampNumeric(Settings::Gameplay.magickaPercent, 0, 100);
         clampNumeric(Settings::Gameplay.staminaPercent, 0, 100);
         clampNumeric(Settings::Gameplay.invulnerabilitySeconds, 0, 30);
+        for (auto* cost : {
+                 &Settings::Gameplay.respawnHereCost,
+                 &Settings::Gameplay.lastCheckpointCost,
+                 &Settings::Gameplay.lastSleepCost }) {
+            cost->quantity = std::clamp(cost->quantity, 1, 999999);
+            cost->action = static_cast<Settings::ResourceAction>(
+                std::clamp(static_cast<int>(cost->action), 0, 1));
+        }
         Settings::Gameplay.defeatPose = std::clamp(
             Settings::Gameplay.defeatPose,
             static_cast<int>(Settings::DefeatPose::kBleedout),
@@ -183,6 +213,76 @@ namespace {
         return true;
     }
 
+    std::string ToLower(std::string value) {
+        std::ranges::transform(value, value.begin(), [](unsigned char character) {
+            return static_cast<char>(std::tolower(character));
+        });
+        return value;
+    }
+
+    void SetFixedComboPopupWidth(const float width) {
+        const auto* style = ImGui::GetStyle();
+        const float paddingY = style ? style->WindowPadding.y : 8.0F;
+        const float maxHeight = ImGui::GetTextLineHeightWithSpacing() * 12.0F + paddingY * 2.0F;
+        ImGui::SetNextWindowSizeConstraints({ width, 0.0F }, { width, maxHeight });
+    }
+
+    bool DrawSearchableStringCombo(
+        const char* label,
+        const std::string& stateKey,
+        int& selectedIndex,
+        const std::vector<std::string>& items,
+        const float popupWidth)
+    {
+        if (items.empty()) {
+            return false;
+        }
+
+        selectedIndex = std::clamp(selectedIndex, 0, static_cast<int>(items.size()) - 1);
+        ImGui::SetNextItemWidth(-1.0F);
+        SetFixedComboPopupWidth(popupWidth);
+        if (!ImGui::BeginCombo(label, items[static_cast<std::size_t>(selectedIndex)].c_str())) {
+            return false;
+        }
+
+        auto& filter = searchableComboFilters[stateKey];
+        if (ImGui::IsWindowAppearing()) {
+            filter.clear();
+            ImGui::SetKeyboardFocusHere();
+        }
+        char searchBuffer[256]{};
+        strcpy_s(searchBuffer, filter.c_str());
+        ImGui::SetNextItemWidth(-1.0F);
+        const auto searchLabel = fmt::format(
+            "{}##{}_search",
+            ModMenu::GetLoc("menu.resource_filter_placeholder", "Filter..."),
+            stateKey);
+        if (ImGui::InputText(searchLabel.c_str(), searchBuffer, sizeof(searchBuffer))) {
+            filter = searchBuffer;
+        }
+        ImGui::Separator();
+
+        const auto search = ToLower(filter);
+        bool changed = false;
+        bool anyVisible = false;
+        for (std::size_t index = 0; index < items.size(); ++index) {
+            if (!search.empty() && ToLower(items[index]).find(search) == std::string::npos) {
+                continue;
+            }
+            anyVisible = true;
+            if (ImGui::Selectable(items[index].c_str(), selectedIndex == static_cast<int>(index))) {
+                selectedIndex = static_cast<int>(index);
+                filter.clear();
+                changed = true;
+            }
+        }
+        if (!anyVisible) {
+            ImGui::TextDisabled("%s", ModMenu::GetLoc("menu.resource_no_results", "No matching options."));
+        }
+        ImGui::EndCombo();
+        return changed;
+    }
+
     bool DrawGlobalDropdown(const char* label, RE::FormID& selectedFormID) {
         const auto selected = std::ranges::find_if(globalOptions, [selectedFormID](const auto& option) {
             return option.formID == selectedFormID;
@@ -195,6 +295,7 @@ namespace {
 
         bool changed = false;
         ImGui::SetNextItemWidth(360.0F);
+        SetFixedComboPopupWidth(360.0F);
         if (!ImGui::BeginCombo(label, preview)) {
             return false;
         }
@@ -208,20 +309,14 @@ namespace {
         }
         ImGui::Separator();
 
-        const auto lower = [](std::string value) {
-            std::ranges::transform(value, value.begin(), [](unsigned char character) {
-                return static_cast<char>(std::tolower(character));
-            });
-            return value;
-        };
-        const auto filter = lower(search);
+        const auto filter = ToLower(search);
         if (ImGui::Selectable(ModMenu::GetLoc("menu.value_global_none", "None"), selectedFormID == 0)) {
             selectedFormID = 0;
             search.clear();
             changed = true;
         }
         for (const auto& option : globalOptions) {
-            if (!filter.empty() && lower(option.label).find(filter) == std::string::npos) {
+            if (!filter.empty() && ToLower(option.label).find(filter) == std::string::npos) {
                 continue;
             }
             const bool isSelected = option.formID == selectedFormID;
@@ -235,6 +330,164 @@ namespace {
             }
         }
         ImGui::EndCombo();
+        return changed;
+    }
+
+    bool DrawResourceDropdown(
+        const char* label,
+        const char* stateKey,
+        RE::FormID& selectedFormID)
+    {
+        const auto selected = std::ranges::find_if(resourceOptions, [selectedFormID](const auto& option) {
+            return option.formID == selectedFormID;
+        });
+        const auto unresolvedPreview = selectedFormID == 0 ? std::string{} :
+            fmt::format("Unresolved [{:08X}]", selectedFormID);
+        const auto preview = selected != resourceOptions.end() ? selected->label.c_str() :
+            selectedFormID == 0 ? ModMenu::GetLoc("menu.resource_none", "None") :
+                                  unresolvedPreview.c_str();
+
+        bool changed = false;
+        ImGui::SetNextItemWidth(360.0F);
+        SetFixedComboPopupWidth(520.0F);
+        if (!ImGui::BeginCombo(label, preview)) {
+            return false;
+        }
+
+        auto& pickerState = resourcePickerStates[stateKey];
+        char searchBuffer[256]{};
+        strcpy_s(searchBuffer, pickerState.search.c_str());
+        ImGui::SetNextItemWidth(-1.0F);
+        const auto searchLabel = fmt::format(
+            "{}##resource_search",
+            ModMenu::GetLoc("menu.resource_filter_placeholder", "Filter..."));
+        if (ImGui::InputText(searchLabel.c_str(), searchBuffer, sizeof(searchBuffer))) {
+            pickerState.search = searchBuffer;
+        }
+
+        DrawSearchableStringCombo(
+            ModMenu::GetLoc("menu.resource_filter_plugin", "Plugin"),
+            std::string(stateKey) + ":plugin",
+            pickerState.pluginIndex,
+            resourcePlugins,
+            420.0F);
+        DrawSearchableStringCombo(
+            ModMenu::GetLoc("menu.resource_filter_type", "Form type"),
+            std::string(stateKey) + ":type",
+            pickerState.typeIndex,
+            resourceTypes,
+            420.0F);
+        ImGui::Separator();
+
+        pickerState.pluginIndex = std::clamp(
+            pickerState.pluginIndex,
+            0,
+            static_cast<int>(resourcePlugins.size()) - 1);
+        pickerState.typeIndex = std::clamp(
+            pickerState.typeIndex,
+            0,
+            static_cast<int>(resourceTypes.size()) - 1);
+        const auto filter = ToLower(pickerState.search);
+        const auto& pluginFilter = resourcePlugins[static_cast<std::size_t>(pickerState.pluginIndex)];
+        const auto& typeFilter = resourceTypes[static_cast<std::size_t>(pickerState.typeIndex)];
+        if (ImGui::Selectable(ModMenu::GetLoc("menu.resource_none", "None"), selectedFormID == 0)) {
+            selectedFormID = 0;
+            pickerState.search.clear();
+            changed = true;
+        }
+
+        std::vector<const ResourceOption*> visibleRows;
+        visibleRows.reserve(resourceOptions.size());
+        for (const auto& option : resourceOptions) {
+            if (pickerState.pluginIndex != 0 && option.pluginName != pluginFilter) {
+                continue;
+            }
+            if (pickerState.typeIndex != 0 && option.formType != typeFilter) {
+                continue;
+            }
+            if (!filter.empty() && option.searchText.find(filter) == std::string::npos) {
+                continue;
+            }
+            visibleRows.push_back(&option);
+        }
+
+        ImGui::Text(
+            "%s: %zu",
+            ModMenu::GetLoc("menu.resource_available", "Available"),
+            visibleRows.size());
+        if (visibleRows.empty()) {
+            ImGui::TextDisabled("%s", ModMenu::GetLoc("menu.resource_no_results", "No matching options."));
+        } else {
+            auto* clipper = ImGui::ImGuiListClipperManager::Create();
+            ImGui::ImGuiListClipperManager::Begin(clipper, static_cast<int>(visibleRows.size()), 0.0F);
+            while (ImGui::ImGuiListClipperManager::Step(clipper)) {
+                for (int row = clipper->DisplayStart; row < clipper->DisplayEnd; ++row) {
+                    const auto& option = *visibleRows[static_cast<std::size_t>(row)];
+                    const bool isSelected = option.formID == selectedFormID;
+                    if (ImGui::Selectable(option.label.c_str(), isSelected)) {
+                        selectedFormID = option.formID;
+                        pickerState.search.clear();
+                        changed = true;
+                    }
+                    if (isSelected) {
+                        ImGui::SetItemDefaultFocus();
+                    }
+                }
+            }
+            ImGui::ImGuiListClipperManager::End(clipper);
+            ImGui::ImGuiListClipperManager::Destroy(clipper);
+        }
+        ImGui::EndCombo();
+        return changed;
+    }
+
+    bool DrawResourceCost(const char* label, Settings::RespawnResourceCost& cost) {
+        if (!ImGui::CollapsingHeader(label)) {
+            return false;
+        }
+
+        bool changed = false;
+        ImGui::PushID(label);
+        ImGui::Indent();
+        changed |= ImGui::Checkbox(ModMenu::GetLoc("menu.resource_enabled", "Enable resource cost"), &cost.enabled);
+        if (cost.enabled) {
+            changed |= DrawResourceDropdown(
+                ModMenu::GetLoc("menu.resource_form", "Resource"),
+                label,
+                cost.resource);
+            changed |= RenderIntSliderWithInput(
+                ModMenu::GetLoc("menu.resource_quantity", "Required quantity"),
+                &cost.quantity,
+                1,
+                999999);
+            const char* actions[] = {
+                ModMenu::GetLoc("menu.resource_action_spend", "Spend"),
+                ModMenu::GetLoc("menu.resource_action_use", "Use")
+            };
+            int action = static_cast<int>(cost.action);
+            if (ImGui::Combo(
+                    ModMenu::GetLoc("menu.resource_action", "Resource action"),
+                    &action,
+                    actions,
+                    static_cast<int>(std::size(actions)))) {
+                cost.action = static_cast<Settings::ResourceAction>(std::clamp(action, 0, 1));
+                changed = true;
+            }
+
+            auto form = RE::TESForm::LookupByID(cost.resource);
+            auto resource = form ? form->As<RE::TESBoundObject>() : nullptr;
+            auto player = RE::PlayerCharacter::GetSingleton();
+            if (resource && player) {
+                ImGui::TextDisabled(
+                    "%s: %d",
+                    ModMenu::GetLoc("menu.resource_owned", "Currently owned"),
+                    std::max(player->GetItemCount(resource), 0));
+            } else if (cost.resource != 0) {
+                ImGui::TextDisabled("%s", ModMenu::GetLoc("menu.resource_unresolved", "Resource is not currently resolved"));
+            }
+        }
+        ImGui::Unindent();
+        ImGui::PopID();
         return changed;
     }
 
@@ -375,6 +628,72 @@ namespace {
         return object;
     }
 
+    void ReadResourceCost(
+        const rapidjson::Value& costs,
+        const char* key,
+        Settings::RespawnResourceCost& cost)
+    {
+        if (!costs.HasMember(key) || !costs[key].IsObject()) {
+            return;
+        }
+        const auto& object = costs[key];
+        ReadBool(object, "enabled", cost.enabled);
+        ReadInt(object, "quantity", cost.quantity);
+        if (object.HasMember("action") && object["action"].IsInt()) {
+            cost.action = static_cast<Settings::ResourceAction>(
+                std::clamp(object["action"].GetInt(), 0, 1));
+        }
+
+        cost.resource = 0;
+        if (object.HasMember("resourceEditorID") && object["resourceEditorID"].IsString()) {
+            if (const auto form = RE::TESForm::LookupByEditorID(object["resourceEditorID"].GetString())) {
+                if (form->As<RE::TESBoundObject>()) {
+                    cost.resource = form->GetFormID();
+                    return;
+                }
+            }
+        }
+        if (object.HasMember("resource")) {
+            const auto& resource = object["resource"];
+            if (resource.IsString()) {
+                cost.resource = FormIDFromString(resource.GetString());
+            } else if (resource.IsUint()) {
+                cost.resource = resource.GetUint();
+            }
+        }
+    }
+
+    rapidjson::Value MakeResourceCost(
+        const Settings::RespawnResourceCost& cost,
+        rapidjson::Document::AllocatorType& allocator)
+    {
+        rapidjson::Value object(rapidjson::kObjectType);
+        object.AddMember("enabled", cost.enabled, allocator);
+        object.AddMember("quantity", cost.quantity, allocator);
+        object.AddMember("action", static_cast<int>(cost.action), allocator);
+
+        const auto form = RE::TESForm::LookupByID(cost.resource);
+        if (form && form->As<RE::TESBoundObject>()) {
+            const auto normalized = NormalizeFormID(form);
+            rapidjson::Value resource;
+            resource.SetString(normalized.c_str(), allocator);
+            object.AddMember("resource", resource, allocator);
+            try {
+                const auto editorID = clib_util::editorID::get_editorID(form);
+                if (!editorID.empty()) {
+                    rapidjson::Value editorIDValue;
+                    editorIDValue.SetString(editorID.c_str(), allocator);
+                    object.AddMember("resourceEditorID", editorIDValue, allocator);
+                }
+            } catch (...) {
+                logger::warn("Could not read the EditorID for resource {:08X} while saving settings.", cost.resource);
+            }
+        } else {
+            object.AddMember("resource", cost.resource, allocator);
+        }
+        return object;
+    }
+
     void ReadActionStyle(
         const rapidjson::Value& actions,
         const char* key,
@@ -408,6 +727,12 @@ namespace {
             gameplay, "stamina", "staminaPercent", Settings::Gameplay.staminaPercent);
         ReadNumericValueSetting(
             gameplay, "invulnerability", "invulnerabilitySeconds", Settings::Gameplay.invulnerabilitySeconds);
+        if (gameplay.HasMember("respawnCosts") && gameplay["respawnCosts"].IsObject()) {
+            const auto& costs = gameplay["respawnCosts"];
+            ReadResourceCost(costs, "respawn_here", Settings::Gameplay.respawnHereCost);
+            ReadResourceCost(costs, "respawn_checkpoint", Settings::Gameplay.lastCheckpointCost);
+            ReadResourceCost(costs, "respawn_last_sleep", Settings::Gameplay.lastSleepCost);
+        }
     }
 
     void ReadUISettings(const rapidjson::Value& ui) {
@@ -560,6 +885,110 @@ void ModMenu::RefreshGlobalList() {
     logger::info("Loaded {} Global forms for typed gameplay settings.", globalOptions.size());
 }
 
+void ModMenu::RefreshResourceList() {
+    resourceOptions.clear();
+    resourcePlugins.assign(1, "All");
+    resourceTypes.assign(1, "All");
+    resourcePickerStates.clear();
+    searchableComboFilters.clear();
+    const auto dataHandler = RE::TESDataHandler::GetSingleton();
+    if (!dataHandler) {
+        logger::warn("Could not populate respawn resource list: TESDataHandler is unavailable.");
+        return;
+    }
+
+    const auto append = [&]<class T>(const char* typeName) {
+        const auto& forms = dataHandler->GetFormArray<T>();
+        for (const auto form : forms) {
+            if (!form || form->IsDeleted() || form->IsIgnored()) {
+                continue;
+            }
+            try {
+                const auto editorID = clib_util::editorID::get_editorID(form);
+                std::string name;
+                if (const auto fullName = form->template As<RE::TESFullName>()) {
+                    name = fullName->fullName.c_str();
+                }
+                const auto plugin = form->GetFile(0) ? form->GetFile(0)->GetFilename() : "Dynamic";
+                const auto normalizedFormID = NormalizeFormID(form);
+                std::string label;
+                if (!editorID.empty() && !normalizedFormID.empty()) {
+                    label = fmt::format("{} ({})", editorID, normalizedFormID);
+                } else if (!editorID.empty()) {
+                    label = editorID;
+                } else if (!normalizedFormID.empty()) {
+                    label = normalizedFormID;
+                } else {
+                    label = fmt::format("{:08X}", form->GetFormID());
+                }
+                if (!name.empty() && name != editorID) {
+                    label += " - " + name;
+                }
+
+                const std::string pluginName(plugin);
+                const std::string type = typeName;
+                std::string searchText = ToLower(label);
+                searchText += ' ';
+                searchText += ToLower(name);
+                searchText += ' ';
+                searchText += ToLower(editorID);
+                searchText += ' ';
+                searchText += ToLower(normalizedFormID);
+                searchText += ' ';
+                searchText += ToLower(pluginName);
+                searchText += ' ';
+                searchText += ToLower(type);
+
+                resourceOptions.push_back(ResourceOption{
+                    form->GetFormID(),
+                    editorID,
+                    normalizedFormID,
+                    name,
+                    pluginName,
+                    type,
+                    std::move(label),
+                    std::move(searchText)
+                });
+                resourcePlugins.push_back(pluginName);
+                resourceTypes.push_back(type);
+            } catch (const std::exception& error) {
+                logger::warn(
+                    "Could not add resource {:08X} to the settings list: {}",
+                    form->GetFormID(),
+                    error.what());
+            } catch (...) {
+                logger::warn(
+                    "Could not add resource {:08X} to the settings list due to an unknown error.",
+                    form->GetFormID());
+            }
+        }
+    };
+
+    append.template operator()<RE::TESObjectARMO>("Armor");
+    append.template operator()<RE::TESObjectWEAP>("Weapon");
+    append.template operator()<RE::TESAmmo>("Ammo");
+    append.template operator()<RE::AlchemyItem>("Alchemy Item");
+    append.template operator()<RE::IngredientItem>("Ingredient");
+    append.template operator()<RE::ScrollItem>("Scroll");
+    append.template operator()<RE::TESObjectBOOK>("Book");
+    append.template operator()<RE::TESObjectMISC>("Misc Item");
+    append.template operator()<RE::TESKey>("Key");
+    append.template operator()<RE::TESSoulGem>("Soul Gem");
+    append.template operator()<RE::TESObjectLIGH>("Light");
+    append.template operator()<RE::BGSApparatus>("Apparatus");
+
+    std::ranges::sort(resourceOptions, {}, &ResourceOption::label);
+    std::ranges::sort(resourcePlugins.begin() + 1, resourcePlugins.end());
+    resourcePlugins.erase(
+        std::unique(resourcePlugins.begin() + 1, resourcePlugins.end()),
+        resourcePlugins.end());
+    std::ranges::sort(resourceTypes.begin() + 1, resourceTypes.end());
+    resourceTypes.erase(
+        std::unique(resourceTypes.begin() + 1, resourceTypes.end()),
+        resourceTypes.end());
+    logger::info("Loaded {} inventory forms for respawn resource settings.", resourceOptions.size());
+}
+
 const char* ModMenu::GetLoc(const std::string& key, const char* fallback) {
     const auto it = language.find(key);
     return it == language.end() ? fallback : it->second.c_str();
@@ -668,6 +1097,20 @@ void ModMenu::SaveGameplaySettings() {
         "invulnerability",
         MakeNumericValueSetting(Settings::Gameplay.invulnerabilitySeconds, allocator),
         allocator);
+    rapidjson::Value respawnCosts(rapidjson::kObjectType);
+    respawnCosts.AddMember(
+        "respawn_here",
+        MakeResourceCost(Settings::Gameplay.respawnHereCost, allocator),
+        allocator);
+    respawnCosts.AddMember(
+        "respawn_checkpoint",
+        MakeResourceCost(Settings::Gameplay.lastCheckpointCost, allocator),
+        allocator);
+    respawnCosts.AddMember(
+        "respawn_last_sleep",
+        MakeResourceCost(Settings::Gameplay.lastSleepCost, allocator),
+        allocator);
+    document.AddMember("respawnCosts", respawnCosts, allocator);
 
     WriteDocument(GAMEPLAY_SETTINGS_PATH, document);
 }
@@ -732,6 +1175,18 @@ void ModMenu::GameplayRender() {
         Settings::Gameplay.invulnerabilitySeconds,
         0,
         30);
+
+    ImGui::Separator();
+    ImGui::TextUnformatted(GetLoc("menu.respawn_costs", "Respawn resource costs"));
+    changed |= DrawResourceCost(
+        GetLoc("menu.cost_respawn_here", "Respawn Here resource cost"),
+        Settings::Gameplay.respawnHereCost);
+    changed |= DrawResourceCost(
+        GetLoc("menu.cost_checkpoint", "Last Checkpoint resource cost"),
+        Settings::Gameplay.lastCheckpointCost);
+    changed |= DrawResourceCost(
+        GetLoc("menu.cost_last_sleep", "Last Sleep resource cost"),
+        Settings::Gameplay.lastSleepCost);
 
     if (changed) {
         SaveGameplaySettings();
@@ -848,6 +1303,7 @@ void ModMenu::Register(bool loadSettings) {
     LoadLanguage();
     if (loadSettings) {
         RefreshGlobalList();
+        RefreshResourceList();
         LoadSettings();
     }
 

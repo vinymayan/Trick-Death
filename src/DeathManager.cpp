@@ -9,6 +9,7 @@
 #include "MoreRagdollClient.h"
 #include "Prisma.h"
 #include "RespawnPolicyManager.h"
+#include "RespawnCostManager.h"
 #include "RespawnTypes.h"
 #include "TextManager.h"
 
@@ -906,6 +907,16 @@ namespace {
                     "No valid external checkpoint is available.");
             return;
         }
+        const auto costStatus = RespawnCostManager::GetStatus(option, player);
+        if (costStatus.configured && (!costStatus.resourceValid || !costStatus.affordable)) {
+            state.store(DeathState::Defeated);
+            Prisma::ApplyUISettings();
+            Prisma::ShowError(
+                costStatus.resourceValid ?
+                    "You do not have enough of the required resource." :
+                    "The configured respawn resource could not be resolved.");
+            return;
+        }
 
         const auto recoveryMode = activeRecoveryMode.load();
         const bool deferDestinationUntilRagdollRecovery =
@@ -918,6 +929,12 @@ namespace {
                 option == Respawn::Option::LastSleep ?
                     "No valid sleep checkpoint is available." :
                     "No valid external checkpoint is available.");
+            return;
+        }
+        if (!RespawnCostManager::Apply(option, player)) {
+            state.store(DeathState::Defeated);
+            Prisma::ApplyUISettings();
+            Prisma::ShowError("The configured respawn resource could not be used or spent.");
             return;
         }
         activeRespawnOption.store(option);

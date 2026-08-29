@@ -50,6 +50,16 @@ function actionStyle(action: DeathAction) {
     ].join(';');
 }
 
+function actionLabel(action: DeathAction, label: string) {
+    const cost = settings().resourceCosts[action];
+    return cost.configured ? `${label} (${cost.owned}x)` : label;
+}
+
+function actionDisabled(action: DeathAction) {
+    const cost = settings().resourceCosts[action];
+    return cost.configured && !cost.affordable;
+}
+
 function App() {
     const [background, setBackground] = createSignal('');
     onMount(() => void findBackground().then(setBackground));
@@ -97,30 +107,33 @@ function App() {
                             <button
                                 class="death-action"
                                 style={actionStyle('respawn_here')}
+                                disabled={actionDisabled('respawn_here')}
                                 onClick={() => dispatchAction('respawn_here')}
                             >
                                 <span class="action-index">I</span>
-                                <span>{settings().labels.respawn}</span>
+                                <span>{actionLabel('respawn_here', settings().labels.respawn)}</span>
                             </button>
                         </Show>
                         <Show when={(availableRespawns() & LAST_SLEEP) !== 0}>
                             <button
                                 class="death-action"
                                 style={actionStyle('respawn_last_sleep')}
+                                disabled={actionDisabled('respawn_last_sleep')}
                                 onClick={() => dispatchAction('respawn_last_sleep')}
                             >
                                 <span class="action-index">II</span>
-                                <span>{settings().labels.lastSleep}</span>
+                                <span>{actionLabel('respawn_last_sleep', settings().labels.lastSleep)}</span>
                             </button>
                         </Show>
                         <Show when={(availableRespawns() & LAST_CHECKPOINT) !== 0}>
                             <button
                                 class="death-action"
                                 style={actionStyle('respawn_checkpoint')}
+                                disabled={actionDisabled('respawn_checkpoint')}
                                 onClick={() => dispatchAction('respawn_checkpoint')}
                             >
                                 <span class="action-index">III</span>
-                                <span>{settings().labels.checkpoint}</span>
+                                <span>{actionLabel('respawn_checkpoint', settings().labels.checkpoint)}</span>
                             </button>
                         </Show>
                         <Show when={(availableRespawns() & RELOAD_SAVE) !== 0}>

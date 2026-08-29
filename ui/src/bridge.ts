@@ -7,6 +7,7 @@ export type DeathMenuSettings = {
     titleTextSizePercent: number;
     backgroundTextSizePercent: number;
     actionStyles: Record<DeathAction, DeathActionStyle>;
+    resourceCosts: Record<DeathAction, RespawnResourceStatus>;
     labels: {
         title: string;
         backgroundText: string;
@@ -28,9 +29,25 @@ export type DeathActionStyle = {
     buttonScalePercent: number;
 };
 
+export type RespawnResourceStatus = {
+    configured: boolean;
+    resourceValid: boolean;
+    affordable: boolean;
+    owned: number;
+    required: number;
+};
+
 const defaultActionStyle: DeathActionStyle = {
     textSizePercent: 100,
     buttonScalePercent: 100,
+};
+
+const defaultResourceStatus: RespawnResourceStatus = {
+    configured: false,
+    resourceValid: true,
+    affordable: true,
+    owned: 0,
+    required: 0,
 };
 
 const defaults: DeathMenuSettings = {
@@ -44,6 +61,12 @@ const defaults: DeathMenuSettings = {
         respawn_last_sleep: { ...defaultActionStyle },
         respawn_checkpoint: { ...defaultActionStyle },
         reload_save: { ...defaultActionStyle },
+    },
+    resourceCosts: {
+        respawn_here: { ...defaultResourceStatus },
+        respawn_last_sleep: { ...defaultResourceStatus },
+        respawn_checkpoint: { ...defaultResourceStatus },
+        reload_save: { ...defaultResourceStatus },
     },
     labels: {
         title: 'DEFEATED',
@@ -94,6 +117,14 @@ window.applyDeathMenuSettings = (payload: string) => {
             respawn_last_sleep: { ...current.actionStyles.respawn_last_sleep, ...(parsed.actionStyles?.respawn_last_sleep ?? {}) },
             respawn_checkpoint: { ...current.actionStyles.respawn_checkpoint, ...(parsed.actionStyles?.respawn_checkpoint ?? {}) },
             reload_save: { ...current.actionStyles.reload_save, ...(parsed.actionStyles?.reload_save ?? {}) },
+        },
+        resourceCosts: {
+            ...current.resourceCosts,
+            ...(parsed.resourceCosts ?? {}),
+            respawn_here: { ...current.resourceCosts.respawn_here, ...(parsed.resourceCosts?.respawn_here ?? {}) },
+            respawn_last_sleep: { ...current.resourceCosts.respawn_last_sleep, ...(parsed.resourceCosts?.respawn_last_sleep ?? {}) },
+            respawn_checkpoint: { ...current.resourceCosts.respawn_checkpoint, ...(parsed.resourceCosts?.respawn_checkpoint ?? {}) },
+            reload_save: { ...current.resourceCosts.reload_save, ...(parsed.resourceCosts?.reload_save ?? {}) },
         },
         labels: { ...current.labels, ...(parsed.labels ?? {}) },
     });

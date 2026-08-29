@@ -3,6 +3,7 @@
 #include "Configuration.h"
 #include "DeathManager.h"
 #include "PrismaUI_API.h"
+#include "RespawnCostManager.h"
 #include "TextManager.h"
 
 #include <rapidjson/stringbuffer.h>
@@ -15,7 +16,28 @@ namespace {
     bool focused = false;
     bool menuVisible = false;
     bool pendingShow = false;
+    bool mouseModeAvailable = false;
+    bool mouseModeTriggered = false;
     std::uint32_t pendingAvailableRespawns = 0;
+
+    bool ShouldTriggerMouseMode() {
+        const auto inputManager = RE::BSInputDeviceManager::GetSingleton();
+        return mouseModeAvailable && inputManager && inputManager->IsGamepadEnabled();
+    }
+
+    void TriggerMouseModeEvent(bool close) {
+        const auto dispatcher = SKSE::GetModCallbackEventSource();
+        if (!dispatcher) {
+            return;
+        }
+        SKSE::ModCallbackEvent event{
+            RE::BSFixedString("MouseMode_Trigger"),
+            RE::BSFixedString(""),
+            close ? 0.0F : 1.0F,
+            nullptr
+        };
+        dispatcher->SendEvent(&event);
+    }
 
     std::string BuildSettingsPayload() {
         const auto title = TextManager::ResolveSlot("title", ModMenu::GetLoc("ui.title", "DEFEATED"));
@@ -73,6 +95,28 @@ namespace {
         writeActionStyle("respawn_checkpoint", Settings::UI.lastCheckpoint);
         writeActionStyle("reload_save", Settings::UI.reloadSave);
         writer.EndObject();
+        writer.Key("resourceCosts");
+        writer.StartObject();
+        const auto writeResourceStatus = [&](const char* key, Respawn::Option option) {
+            const auto status = RespawnCostManager::GetStatus(option);
+            writer.Key(key);
+            writer.StartObject();
+            writer.Key("configured");
+            writer.Bool(status.configured);
+            writer.Key("resourceValid");
+            writer.Bool(status.resourceValid);
+            writer.Key("affordable");
+            writer.Bool(status.affordable);
+            writer.Key("owned");
+            writer.Int(status.owned);
+            writer.Key("required");
+            writer.Int(status.required);
+            writer.EndObject();
+        };
+        writeResourceStatus("respawn_here", Respawn::Option::Here);
+        writeResourceStatus("respawn_last_sleep", Respawn::Option::LastSleep);
+        writeResourceStatus("respawn_checkpoint", Respawn::Option::LastCheckpoint);
+        writer.EndObject();
         writer.Key("labels");
         writer.StartObject();
         writer.Key("title");
@@ -115,6 +159,7 @@ namespace {
             return;
         }
 
+        const bool wasVisible = menuVisible;
         SendSettings();
         prismaUI->Show(view);
         const auto payload = std::to_string(availableRespawns);
@@ -125,6 +170,10 @@ namespace {
         }
         focused = prismaUI->Focus(view, Settings::Gameplay.pauseGameWhileMenuOpen);
         menuVisible = true;
+        if (!wasVisible && ShouldTriggerMouseMode()) {
+            TriggerMouseModeEvent(false);
+            mouseModeTriggered = true;
+        }
         pendingShow = false;
     }
 
@@ -173,6 +222,8 @@ namespace {
 }
 
 void Prisma::Install() {
+    mouseModeAvailable = GetModuleHandleA("MouseMode.dll") != nullptr;
+    logger::info("Mouse Mode detection: installed={}.", mouseModeAvailable);
     prismaUI = reinterpret_cast<PRISMA_UI_API::IVPrismaUI1*>(PRISMA_UI_API::RequestPluginAPI());
     if (!prismaUI) {
         logger::error("Could not obtain the PrismaUI API.");
@@ -188,6 +239,10 @@ void Prisma::Preload() {
 void Prisma::Hide() {
     pendingShow = false;
     menuVisible = false;
+    if (mouseModeTriggered) {
+        TriggerMouseModeEvent(true);
+        mouseModeTriggered = false;
+    }
     if (!prismaUI || !view) {
         return;
     }

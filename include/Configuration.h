@@ -17,11 +17,23 @@ namespace Settings {
         kActorValue = 2
     };
 
+    enum class ResourceAction : int {
+        kSpend = 0,
+        kUse = 1
+    };
+
     struct NumericValueSetting {
         int flatValue = 0;
         RE::FormID global = 0;
         std::string actorValue;
         ValueSource source = ValueSource::kFlat;
+    };
+
+    struct RespawnResourceCost {
+        bool enabled = false;
+        RE::FormID resource = 0;
+        int quantity = 1;
+        ResourceAction action = ResourceAction::kSpend;
     };
 
     struct GameplaySettings {
@@ -32,6 +44,9 @@ namespace Settings {
         NumericValueSetting magickaPercent{ 50, 0, "Magicka", ValueSource::kFlat };
         NumericValueSetting staminaPercent{ 50, 0, "Stamina", ValueSource::kFlat };
         NumericValueSetting invulnerabilitySeconds{ 3, 0, "Block", ValueSource::kFlat };
+        RespawnResourceCost respawnHereCost;
+        RespawnResourceCost lastCheckpointCost;
+        RespawnResourceCost lastSleepCost;
     };
 
     struct ActionStyle {
@@ -67,6 +82,7 @@ namespace ModMenu {
     void UIRender();
     void DiagnosticsRender();
     void RefreshGlobalList();
+    void RefreshResourceList();
     void LoadSettings();
     void SaveSettings();
     void SaveGameplaySettings();
