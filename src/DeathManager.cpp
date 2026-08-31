@@ -7,6 +7,7 @@
 #include "DeathTrackerManager.h"
 #include "IntegrationEvents.h"
 #include "MoreRagdollClient.h"
+#include "PlayerLootManager.h"
 #include "Prisma.h"
 #include "RespawnPolicyManager.h"
 #include "RespawnCostManager.h"
@@ -917,6 +918,20 @@ namespace {
                     "The configured respawn resource could not be resolved.");
             return;
         }
+        const auto lootStatus = PlayerLootManager::GetStatus(option);
+        if (lootStatus.configured && !lootStatus.containerValid) {
+            state.store(DeathState::Defeated);
+            Prisma::ShowError("The configured player-loot container could not be resolved.");
+            return;
+        }
+
+        auto preparedLoot = PlayerLootManager::Prepare(option, player);
+        if (preparedLoot.failed) {
+            PlayerLootManager::Cancel(preparedLoot);
+            state.store(DeathState::Defeated);
+            Prisma::ShowError("The player-loot container could not be created at the death location.");
+            return;
+        }
 
         const auto recoveryMode = activeRecoveryMode.load();
         const bool deferDestinationUntilRagdollRecovery =
@@ -924,6 +939,7 @@ namespace {
             recoveryMode == DefeatRecoveryMode::Ragdoll;
         if (IsDestinationRespawn(option) && !deferDestinationUntilRagdollRecovery &&
             !MoveToRespawnDestination(option)) {
+            PlayerLootManager::Cancel(preparedLoot);
             state.store(DeathState::Defeated);
             Prisma::ShowError(
                 option == Respawn::Option::LastSleep ?
@@ -932,11 +948,19 @@ namespace {
             return;
         }
         if (!RespawnCostManager::Apply(option, player)) {
+            PlayerLootManager::Cancel(preparedLoot);
             state.store(DeathState::Defeated);
             Prisma::ApplyUISettings();
             Prisma::ShowError("The configured respawn resource could not be used or spent.");
             return;
         }
+        if (!PlayerLootManager::Commit(preparedLoot, option, player)) {
+            PlayerLootManager::Cancel(preparedLoot);
+            state.store(DeathState::Defeated);
+            Prisma::ShowError("The player inventory could not be transferred to the loot container.");
+            return;
+        }
+        PlayerLootManager::ClearDeathLocation();
         activeRespawnOption.store(option);
         IntegrationEvents::SendRespawnSelected(option);
         Prisma::Hide();
@@ -970,6 +994,7 @@ namespace {
         }
 
         activeRespawnOption.store(Respawn::Option::ReloadSave);
+        PlayerLootManager::ClearDeathLocation();
         IntegrationEvents::SendRespawnSelected(Respawn::Option::ReloadSave);
         Prisma::Hide();
         RestoreTemporaryGhost(RE::PlayerCharacter::GetSingleton());
@@ -1107,6 +1132,11 @@ bool DeathManager::TryInterceptDeath(
     const bool inKillMove = IsPlayerKillMoveActive(player);
     const bool alreadyRagdolled = IsAlreadyRagdolled(player);
     const auto lethalDamage = ConsumeLethalDamageContext(attacker);
+    auto* killer = attacker;
+    if ((!killer || killer == player) && lethalDamage.attacker != 0 &&
+        lethalDamage.attacker != player->GetFormID()) {
+        killer = RE::TESForm::LookupByID<RE::Actor>(lethalDamage.attacker);
+    }
     const bool projectileImpact =
         !inKillMove && lethalDamage.origin == AppliedDamageOrigin::ProjectileImpact;
     const bool lethalFall =
@@ -1132,10 +1162,15 @@ bool DeathManager::TryInterceptDeath(
     activeRecoveryMode.store(DefeatRecoveryMode::None);
 
     const auto generation = defeatGeneration.fetch_add(1) + 1;
+    PlayerLootManager::HandleNewDeath();
+    PlayerLootManager::CaptureDeathLocation(player);
     DeathTrackerManager::RecordDeath(player);
     UpdateTextContext(player, attacker, deathPresentation);
     ProtectPlayerForDecision(player, !inKillMove);
     player->NotifyAnimationGraph("TrickDeathStarted");
+    if (killer && killer != player) {
+        killer->NotifyAnimationGraph("KilledPlayer");
+    }
     if (inKillMove) {
         killMoveAttacker = attacker ? attacker->GetHandle() : RE::ActorHandle{};
         ScheduleKillMoveFallback(generation);
@@ -1351,6 +1386,7 @@ void DeathManager::Reset() {
         activeDeathSourceName.clear();
     }
     TextManager::ClearRuntimeVariables();
+    PlayerLootManager::ClearDeathLocation();
     ClearAppliedDamageContexts();
     killMoveAttacker.reset();
     activeDefeatCause.store(DefeatCause::None);

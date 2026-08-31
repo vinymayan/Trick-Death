@@ -2,6 +2,7 @@
 
 #include "CheckpointManager.h"
 #include "DeathTrackerManager.h"
+#include "PlayerLootManager.h"
 #include "RespawnPolicyManager.h"
 #include "TextManager.h"
 
@@ -10,6 +11,7 @@ void SerializationManager::Save(SKSE::SerializationInterface* serialization) {
     RespawnPolicyManager::Save(serialization);
     TextManager::Save(serialization);
     DeathTrackerManager::Save(serialization);
+    PlayerLootManager::Save(serialization);
 }
 
 void SerializationManager::Load(SKSE::SerializationInterface* serialization) {
@@ -26,7 +28,8 @@ void SerializationManager::Load(SKSE::SerializationInterface* serialization) {
             CheckpointManager::LoadRecord(serialization, type, version, length) ||
             RespawnPolicyManager::LoadRecord(serialization, type, version, length) ||
             TextManager::LoadRecord(serialization, type, version, length) ||
-            DeathTrackerManager::LoadRecord(serialization, type, version, length);
+            DeathTrackerManager::LoadRecord(serialization, type, version, length) ||
+            PlayerLootManager::LoadRecord(serialization, type, version, length);
         if (!handled) {
             logger::warn(
                 "Ignoring unknown Trick Death co-save record type={:08X}, version={}, length={}.",
@@ -42,4 +45,5 @@ void SerializationManager::Revert(SKSE::SerializationInterface*) {
     RespawnPolicyManager::Revert();
     TextManager::Revert();
     DeathTrackerManager::Revert();
+    PlayerLootManager::Revert();
 }

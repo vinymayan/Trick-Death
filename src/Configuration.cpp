@@ -4,6 +4,7 @@
 #include "CheckpointManager.h"
 #include "CurrentSaveManager.h"
 #include "IntegrationEvents.h"
+#include "PlayerLootManager.h"
 #include "Prisma.h"
 #include "RespawnPolicyManager.h"
 #include "TextManager.h"
@@ -58,10 +59,13 @@ namespace {
 
     std::vector<GlobalOption> globalOptions;
     std::vector<ResourceOption> resourceOptions;
+    std::vector<ResourceOption> containerOptions;
     std::vector<std::string> resourcePlugins{ "All" };
     std::vector<std::string> resourceTypes{ "All" };
+    std::vector<std::string> containerPlugins{ "All" };
     std::map<std::string, std::string> globalSearchText;
     std::map<std::string, ResourcePickerState> resourcePickerStates;
+    std::map<std::string, ResourcePickerState> containerPickerStates;
     std::map<std::string, std::string> searchableComboFilters;
 
     const RE::TESFile* GetMasterFile(RE::TESForm* form) {
@@ -165,6 +169,13 @@ namespace {
             cost->quantity = std::clamp(cost->quantity, 1, 999999);
             cost->action = static_cast<Settings::ResourceAction>(
                 std::clamp(static_cast<int>(cost->action), 0, 1));
+        }
+        for (auto* loot : {
+                 &Settings::Gameplay.respawnHereLoot,
+                 &Settings::Gameplay.lastCheckpointLoot,
+                 &Settings::Gameplay.lastSleepLoot }) {
+            loot->mode = static_cast<Settings::LootDropMode>(
+                std::clamp(static_cast<int>(loot->mode), 0, 1));
         }
         Settings::Gameplay.defeatPose = std::clamp(
             Settings::Gameplay.defeatPose,
@@ -441,6 +452,98 @@ namespace {
         return changed;
     }
 
+    bool DrawContainerDropdown(
+        const char* label,
+        const char* stateKey,
+        RE::FormID& selectedFormID)
+    {
+        const auto selected = std::ranges::find_if(containerOptions, [selectedFormID](const auto& option) {
+            return option.formID == selectedFormID;
+        });
+        const auto unresolvedPreview = selectedFormID == 0 ? std::string{} :
+            fmt::format("Unresolved [{:08X}]", selectedFormID);
+        const auto preview = selected != containerOptions.end() ? selected->label.c_str() :
+            selectedFormID == 0 ? ModMenu::GetLoc("menu.loot_container_none", "None") :
+                                  unresolvedPreview.c_str();
+
+        bool changed = false;
+        ImGui::SetNextItemWidth(360.0F);
+        SetFixedComboPopupWidth(520.0F);
+        if (!ImGui::BeginCombo(label, preview)) {
+            return false;
+        }
+
+        auto& pickerState = containerPickerStates[stateKey];
+        char searchBuffer[256]{};
+        strcpy_s(searchBuffer, pickerState.search.c_str());
+        ImGui::SetNextItemWidth(-1.0F);
+        const auto searchLabel = fmt::format(
+            "{}##container_search",
+            ModMenu::GetLoc("menu.resource_filter_placeholder", "Filter..."));
+        if (ImGui::InputText(searchLabel.c_str(), searchBuffer, sizeof(searchBuffer))) {
+            pickerState.search = searchBuffer;
+        }
+        DrawSearchableStringCombo(
+            ModMenu::GetLoc("menu.resource_filter_plugin", "Plugin"),
+            std::string(stateKey) + ":container_plugin",
+            pickerState.pluginIndex,
+            containerPlugins,
+            420.0F);
+        ImGui::Separator();
+
+        pickerState.pluginIndex = std::clamp(
+            pickerState.pluginIndex,
+            0,
+            static_cast<int>(containerPlugins.size()) - 1);
+        const auto filter = ToLower(pickerState.search);
+        const auto& pluginFilter = containerPlugins[static_cast<std::size_t>(pickerState.pluginIndex)];
+        if (ImGui::Selectable(ModMenu::GetLoc("menu.loot_container_none", "None"), selectedFormID == 0)) {
+            selectedFormID = 0;
+            pickerState.search.clear();
+            changed = true;
+        }
+
+        std::vector<const ResourceOption*> visibleRows;
+        visibleRows.reserve(containerOptions.size());
+        for (const auto& option : containerOptions) {
+            if (pickerState.pluginIndex != 0 && option.pluginName != pluginFilter) {
+                continue;
+            }
+            if (!filter.empty() && option.searchText.find(filter) == std::string::npos) {
+                continue;
+            }
+            visibleRows.push_back(&option);
+        }
+        ImGui::Text(
+            "%s: %zu",
+            ModMenu::GetLoc("menu.resource_available", "Available"),
+            visibleRows.size());
+        if (visibleRows.empty()) {
+            ImGui::TextDisabled("%s", ModMenu::GetLoc("menu.resource_no_results", "No matching options."));
+        } else {
+            auto* clipper = ImGui::ImGuiListClipperManager::Create();
+            ImGui::ImGuiListClipperManager::Begin(clipper, static_cast<int>(visibleRows.size()), 0.0F);
+            while (ImGui::ImGuiListClipperManager::Step(clipper)) {
+                for (int row = clipper->DisplayStart; row < clipper->DisplayEnd; ++row) {
+                    const auto& option = *visibleRows[static_cast<std::size_t>(row)];
+                    const bool isSelected = option.formID == selectedFormID;
+                    if (ImGui::Selectable(option.label.c_str(), isSelected)) {
+                        selectedFormID = option.formID;
+                        pickerState.search.clear();
+                        changed = true;
+                    }
+                    if (isSelected) {
+                        ImGui::SetItemDefaultFocus();
+                    }
+                }
+            }
+            ImGui::ImGuiListClipperManager::End(clipper);
+            ImGui::ImGuiListClipperManager::Destroy(clipper);
+        }
+        ImGui::EndCombo();
+        return changed;
+    }
+
     bool DrawResourceCost(const char* label, Settings::RespawnResourceCost& cost) {
         if (!ImGui::CollapsingHeader(label)) {
             return false;
@@ -473,6 +576,11 @@ namespace {
                 cost.action = static_cast<Settings::ResourceAction>(std::clamp(action, 0, 1));
                 changed = true;
             }
+            changed |= ImGui::Checkbox(
+                ModMenu::GetLoc(
+                    "menu.resource_keep_for_loot",
+                    "Keep this resource in the player inventory when dropping loot"),
+                &cost.keepInPlayerOnLootDrop);
 
             auto form = RE::TESForm::LookupByID(cost.resource);
             auto resource = form ? form->As<RE::TESBoundObject>() : nullptr;
@@ -485,6 +593,56 @@ namespace {
             } else if (cost.resource != 0) {
                 ImGui::TextDisabled("%s", ModMenu::GetLoc("menu.resource_unresolved", "Resource is not currently resolved"));
             }
+        }
+        ImGui::Unindent();
+        ImGui::PopID();
+        return changed;
+    }
+
+    bool DrawLootDropSetting(const char* label, Settings::PlayerLootDropSetting& setting) {
+        if (!ImGui::CollapsingHeader(label)) {
+            return false;
+        }
+
+        bool changed = false;
+        ImGui::PushID(label);
+        ImGui::Indent();
+        changed |= ImGui::Checkbox(
+            ModMenu::GetLoc("menu.loot_enabled", "Enable player loot drop"),
+            &setting.enabled);
+        if (setting.enabled) {
+            changed |= DrawContainerDropdown(
+                ModMenu::GetLoc("menu.loot_container", "Container"),
+                label,
+                setting.container);
+            const char* modes[] = {
+                ModMenu::GetLoc("menu.loot_mode_all", "All inventory"),
+                ModMenu::GetLoc("menu.loot_mode_unequipped", "Unequipped items only")
+            };
+            int mode = static_cast<int>(setting.mode);
+            if (ImGui::Combo(
+                    ModMenu::GetLoc("menu.loot_mode", "Items to drop"),
+                    &mode,
+                    modes,
+                    static_cast<int>(std::size(modes)))) {
+                setting.mode = static_cast<Settings::LootDropMode>(std::clamp(mode, 0, 1));
+                changed = true;
+            }
+            changed |= ImGui::Checkbox(
+                ModMenu::GetLoc("menu.loot_safe_placement", "Find a safe nearby position"),
+                &setting.safePlacement);
+            if (setting.safePlacement) {
+                ImGui::TextWrapped(
+                    "%s",
+                    ModMenu::GetLoc(
+                        "menu.loot_safe_placement_note",
+                        "Searches for nearby ground and free space; the death position is used as fallback."));
+            }
+            ImGui::TextWrapped(
+                "%s",
+                ModMenu::GetLoc(
+                    "menu.loot_quest_items_note",
+                    "Quest items are always kept by the player."));
         }
         ImGui::Unindent();
         ImGui::PopID();
@@ -638,6 +796,7 @@ namespace {
         }
         const auto& object = costs[key];
         ReadBool(object, "enabled", cost.enabled);
+        ReadBool(object, "keepInPlayerOnLootDrop", cost.keepInPlayerOnLootDrop);
         ReadInt(object, "quantity", cost.quantity);
         if (object.HasMember("action") && object["action"].IsInt()) {
             cost.action = static_cast<Settings::ResourceAction>(
@@ -669,6 +828,7 @@ namespace {
     {
         rapidjson::Value object(rapidjson::kObjectType);
         object.AddMember("enabled", cost.enabled, allocator);
+        object.AddMember("keepInPlayerOnLootDrop", cost.keepInPlayerOnLootDrop, allocator);
         object.AddMember("quantity", cost.quantity, allocator);
         object.AddMember("action", static_cast<int>(cost.action), allocator);
 
@@ -690,6 +850,72 @@ namespace {
             }
         } else {
             object.AddMember("resource", cost.resource, allocator);
+        }
+        return object;
+    }
+
+    void ReadLootDropSetting(
+        const rapidjson::Value& lootDrops,
+        const char* key,
+        Settings::PlayerLootDropSetting& setting)
+    {
+        if (!lootDrops.HasMember(key) || !lootDrops[key].IsObject()) {
+            return;
+        }
+        const auto& object = lootDrops[key];
+        ReadBool(object, "enabled", setting.enabled);
+        ReadBool(object, "safePlacement", setting.safePlacement);
+        if (object.HasMember("mode") && object["mode"].IsInt()) {
+            setting.mode = static_cast<Settings::LootDropMode>(
+                std::clamp(object["mode"].GetInt(), 0, 1));
+        }
+
+        setting.container = 0;
+        if (object.HasMember("containerEditorID") && object["containerEditorID"].IsString()) {
+            if (const auto form = RE::TESForm::LookupByEditorID<RE::TESObjectCONT>(
+                    object["containerEditorID"].GetString())) {
+                setting.container = form->GetFormID();
+                return;
+            }
+        }
+        if (object.HasMember("container")) {
+            const auto& container = object["container"];
+            if (container.IsString()) {
+                setting.container = FormIDFromString(container.GetString());
+            } else if (container.IsUint()) {
+                setting.container = container.GetUint();
+            }
+        }
+    }
+
+    rapidjson::Value MakeLootDropSetting(
+        const Settings::PlayerLootDropSetting& setting,
+        rapidjson::Document::AllocatorType& allocator)
+    {
+        rapidjson::Value object(rapidjson::kObjectType);
+        object.AddMember("enabled", setting.enabled, allocator);
+        object.AddMember("mode", static_cast<int>(setting.mode), allocator);
+        object.AddMember("safePlacement", setting.safePlacement, allocator);
+
+        if (const auto form = RE::TESForm::LookupByID<RE::TESObjectCONT>(setting.container)) {
+            const auto normalized = NormalizeFormID(form);
+            rapidjson::Value container;
+            container.SetString(normalized.c_str(), allocator);
+            object.AddMember("container", container, allocator);
+            try {
+                const auto editorID = clib_util::editorID::get_editorID(form);
+                if (!editorID.empty()) {
+                    rapidjson::Value editorIDValue;
+                    editorIDValue.SetString(editorID.c_str(), allocator);
+                    object.AddMember("containerEditorID", editorIDValue, allocator);
+                }
+            } catch (...) {
+                logger::warn(
+                    "Could not read the EditorID for loot container {:08X} while saving settings.",
+                    setting.container);
+            }
+        } else {
+            object.AddMember("container", setting.container, allocator);
         }
         return object;
     }
@@ -732,6 +958,16 @@ namespace {
             ReadResourceCost(costs, "respawn_here", Settings::Gameplay.respawnHereCost);
             ReadResourceCost(costs, "respawn_checkpoint", Settings::Gameplay.lastCheckpointCost);
             ReadResourceCost(costs, "respawn_last_sleep", Settings::Gameplay.lastSleepCost);
+        }
+        if (gameplay.HasMember("playerLootDrops") && gameplay["playerLootDrops"].IsObject()) {
+            const auto& lootDrops = gameplay["playerLootDrops"];
+            ReadBool(
+                lootDrops,
+                "destroyContainersOnDeath",
+                Settings::Gameplay.destroyLootContainersOnDeath);
+            ReadLootDropSetting(lootDrops, "respawn_here", Settings::Gameplay.respawnHereLoot);
+            ReadLootDropSetting(lootDrops, "respawn_checkpoint", Settings::Gameplay.lastCheckpointLoot);
+            ReadLootDropSetting(lootDrops, "respawn_last_sleep", Settings::Gameplay.lastSleepLoot);
         }
     }
 
@@ -887,9 +1123,12 @@ void ModMenu::RefreshGlobalList() {
 
 void ModMenu::RefreshResourceList() {
     resourceOptions.clear();
+    containerOptions.clear();
     resourcePlugins.assign(1, "All");
     resourceTypes.assign(1, "All");
+    containerPlugins.assign(1, "All");
     resourcePickerStates.clear();
+    containerPickerStates.clear();
     searchableComboFilters.clear();
     const auto dataHandler = RE::TESDataHandler::GetSingleton();
     if (!dataHandler) {
@@ -977,6 +1216,67 @@ void ModMenu::RefreshResourceList() {
     append.template operator()<RE::TESObjectLIGH>("Light");
     append.template operator()<RE::BGSApparatus>("Apparatus");
 
+    const auto& containers = dataHandler->GetFormArray<RE::TESObjectCONT>();
+    containerOptions.reserve(containers.size());
+    for (const auto form : containers) {
+        if (!form || form->IsDeleted() || form->IsIgnored()) {
+            continue;
+        }
+        try {
+            const auto editorID = clib_util::editorID::get_editorID(form);
+            std::string name;
+            if (const auto fullName = form->As<RE::TESFullName>()) {
+                name = fullName->fullName.c_str();
+            }
+            const auto pluginView = form->GetFile(0) ? form->GetFile(0)->GetFilename() : std::string_view("Dynamic");
+            const std::string pluginName(pluginView);
+            const auto normalizedFormID = NormalizeFormID(form);
+            std::string label;
+            if (!editorID.empty() && !normalizedFormID.empty()) {
+                label = fmt::format("{} ({})", editorID, normalizedFormID);
+            } else if (!editorID.empty()) {
+                label = editorID;
+            } else if (!normalizedFormID.empty()) {
+                label = normalizedFormID;
+            } else {
+                label = fmt::format("{:08X}", form->GetFormID());
+            }
+            if (!name.empty() && name != editorID) {
+                label += " - " + name;
+            }
+
+            std::string searchText = ToLower(label);
+            searchText += ' ';
+            searchText += ToLower(name);
+            searchText += ' ';
+            searchText += ToLower(editorID);
+            searchText += ' ';
+            searchText += ToLower(normalizedFormID);
+            searchText += ' ';
+            searchText += ToLower(pluginName);
+            containerOptions.push_back(ResourceOption{
+                form->GetFormID(),
+                editorID,
+                normalizedFormID,
+                name,
+                pluginName,
+                "Container",
+                std::move(label),
+                std::move(searchText)
+            });
+            containerPlugins.push_back(pluginName);
+        } catch (const std::exception& error) {
+            logger::warn(
+                "Could not add container {:08X} to the player-loot settings list: {}",
+                form->GetFormID(),
+                error.what());
+        } catch (...) {
+            logger::warn(
+                "Could not add container {:08X} to the player-loot settings list.",
+                form->GetFormID());
+        }
+    }
+
     std::ranges::sort(resourceOptions, {}, &ResourceOption::label);
     std::ranges::sort(resourcePlugins.begin() + 1, resourcePlugins.end());
     resourcePlugins.erase(
@@ -986,7 +1286,15 @@ void ModMenu::RefreshResourceList() {
     resourceTypes.erase(
         std::unique(resourceTypes.begin() + 1, resourceTypes.end()),
         resourceTypes.end());
-    logger::info("Loaded {} inventory forms for respawn resource settings.", resourceOptions.size());
+    std::ranges::sort(containerOptions, {}, &ResourceOption::label);
+    std::ranges::sort(containerPlugins.begin() + 1, containerPlugins.end());
+    containerPlugins.erase(
+        std::unique(containerPlugins.begin() + 1, containerPlugins.end()),
+        containerPlugins.end());
+    logger::info(
+        "Loaded {} inventory forms and {} containers for respawn settings.",
+        resourceOptions.size(),
+        containerOptions.size());
 }
 
 const char* ModMenu::GetLoc(const std::string& key, const char* fallback) {
@@ -1111,6 +1419,24 @@ void ModMenu::SaveGameplaySettings() {
         MakeResourceCost(Settings::Gameplay.lastSleepCost, allocator),
         allocator);
     document.AddMember("respawnCosts", respawnCosts, allocator);
+    rapidjson::Value playerLootDrops(rapidjson::kObjectType);
+    playerLootDrops.AddMember(
+        "destroyContainersOnDeath",
+        Settings::Gameplay.destroyLootContainersOnDeath,
+        allocator);
+    playerLootDrops.AddMember(
+        "respawn_here",
+        MakeLootDropSetting(Settings::Gameplay.respawnHereLoot, allocator),
+        allocator);
+    playerLootDrops.AddMember(
+        "respawn_checkpoint",
+        MakeLootDropSetting(Settings::Gameplay.lastCheckpointLoot, allocator),
+        allocator);
+    playerLootDrops.AddMember(
+        "respawn_last_sleep",
+        MakeLootDropSetting(Settings::Gameplay.lastSleepLoot, allocator),
+        allocator);
+    document.AddMember("playerLootDrops", playerLootDrops, allocator);
 
     WriteDocument(GAMEPLAY_SETTINGS_PATH, document);
 }
@@ -1188,6 +1514,23 @@ void ModMenu::GameplayRender() {
         GetLoc("menu.cost_last_sleep", "Last Sleep resource cost"),
         Settings::Gameplay.lastSleepCost);
 
+    ImGui::Separator();
+    ImGui::TextUnformatted(GetLoc("menu.player_loot_drop", "Player Drop Loot"));
+    changed |= ImGui::Checkbox(
+        GetLoc(
+            "menu.loot_destroy_on_death",
+            "Destroy existing loot containers on the next death"),
+        &Settings::Gameplay.destroyLootContainersOnDeath);
+    changed |= DrawLootDropSetting(
+        GetLoc("menu.loot_respawn_here", "Respawn Here loot drop"),
+        Settings::Gameplay.respawnHereLoot);
+    changed |= DrawLootDropSetting(
+        GetLoc("menu.loot_checkpoint", "Last Checkpoint loot drop"),
+        Settings::Gameplay.lastCheckpointLoot);
+    changed |= DrawLootDropSetting(
+        GetLoc("menu.loot_last_sleep", "Last Sleep loot drop"),
+        Settings::Gameplay.lastSleepLoot);
+
     if (changed) {
         SaveGameplaySettings();
         Prisma::ApplyUISettings();
@@ -1254,6 +1597,7 @@ void ModMenu::DiagnosticsRender() {
     const auto variables = TextManager::GetVariables();
     const auto lastEvent = IntegrationEvents::GetLastEventDescription();
     const auto currentSave = CurrentSaveManager::GetCurrentSaveName();
+    const auto trackedLootContainers = PlayerLootManager::GetTrackedContainerCount();
 
     ImGui::Text("Available respawns: 0x%02X", evaluation.availableMask);
     ImGui::Text("Blocked respawns: 0x%02X", evaluation.blockedMask);
@@ -1296,6 +1640,11 @@ void ModMenu::DiagnosticsRender() {
     }
     ImGui::Separator();
     ImGui::TextWrapped("Last lifecycle event: %s", lastEvent.c_str());
+    ImGui::Separator();
+    ImGui::Text("Tracked player-loot containers: %zu", trackedLootContainers);
+    if (ImGui::Button("Prune empty player-loot containers")) {
+        PlayerLootManager::PruneEmptyContainers();
+    }
 
 }
 

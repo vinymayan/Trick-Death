@@ -22,6 +22,11 @@ namespace Settings {
         kUse = 1
     };
 
+    enum class LootDropMode : int {
+        kAll = 0,
+        kUnequippedOnly = 1
+    };
+
     struct NumericValueSetting {
         int flatValue = 0;
         RE::FormID global = 0;
@@ -34,6 +39,14 @@ namespace Settings {
         RE::FormID resource = 0;
         int quantity = 1;
         ResourceAction action = ResourceAction::kSpend;
+        bool keepInPlayerOnLootDrop = false;
+    };
+
+    struct PlayerLootDropSetting {
+        bool enabled = false;
+        RE::FormID container = 0;
+        LootDropMode mode = LootDropMode::kUnequippedOnly;
+        bool safePlacement = false;
     };
 
     struct GameplaySettings {
@@ -47,6 +60,10 @@ namespace Settings {
         RespawnResourceCost respawnHereCost;
         RespawnResourceCost lastCheckpointCost;
         RespawnResourceCost lastSleepCost;
+        PlayerLootDropSetting respawnHereLoot;
+        PlayerLootDropSetting lastCheckpointLoot;
+        PlayerLootDropSetting lastSleepLoot;
+        bool destroyLootContainersOnDeath = false;
     };
 
     struct ActionStyle {

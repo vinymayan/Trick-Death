@@ -1,7 +1,7 @@
 function(add_src_folder path)
 
     
-    file(GLOB_RECURSE src_files
+    file(GLOB_RECURSE src_files CONFIGURE_DEPENDS
         "${path}/*.cpp"
     )
 
@@ -11,7 +11,7 @@ endfunction()
 
 function(add_include_folder path)
     
-    file(GLOB_RECURSE header_files
+    file(GLOB_RECURSE header_files CONFIGURE_DEPENDS
         "${path}/*.h"
     )
 

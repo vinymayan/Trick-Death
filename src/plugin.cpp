@@ -8,6 +8,7 @@
 #include "MoreRagdollClient.h"
 #include "PapyrusAPI.h"
 #include "PlayerAnimationSink.h"
+#include "PlayerLootManager.h"
 #include "Prisma.h"
 #include "SerializationManager.h"
 
@@ -90,6 +91,7 @@ void OnMessage(SKSE::MessagingInterface::Message* message) {
             gameplaySettingsLoaded = true;
         }
         CheckpointManager::RegisterEvents();
+        PlayerLootManager::RegisterEvents();
         Prisma::Preload();
         PlayerAnimationSink::GetSingleton()->Install();
     } else if (message->type == SKSE::MessagingInterface::kPreLoadGame) {
@@ -106,6 +108,7 @@ void OnMessage(SKSE::MessagingInterface::Message* message) {
             }
             PlayerAnimationSink::GetSingleton()->Reconnect();
             DeathTrackerManager::ScheduleGraphSync();
+            PlayerLootManager::PruneEmptyContainers();
         }
     } else if (message->type == SKSE::MessagingInterface::kNewGame) {
         if (hasDynamicFormsGenerator && !gameplaySettingsLoaded) {
