@@ -1,5 +1,6 @@
 ﻿#include "DeathManager.h"
 
+#include "BorrowedTimeManager.h"
 #include "CheckpointManager.h"
 #include "CurrentSaveManager.h"
 #include "Configuration.h"
@@ -24,6 +25,8 @@ namespace {
     enum class DeathState : std::uint8_t {
         Alive,
         PendingKillMove,
+        PendingTransformation,
+        BorrowedTime,
         Defeated,
         Resolving,
         Recovering,
@@ -56,6 +59,17 @@ namespace {
         StandardHit,
         ProjectileImpact,
         FallPhysics
+    };
+
+    enum class TransformationType : std::uint8_t {
+        None,
+        Werewolf,
+        VampireLord
+    };
+
+    enum class TransformationOutcome : std::uint8_t {
+        ContinueToTrickDeath,
+        RecoverWithoutDeath
     };
 
     struct PlayerHitContext {
@@ -100,7 +114,12 @@ namespace {
     std::atomic_bool adoptPendingNativeRagdoll{ false };
     std::atomic_uint32_t activeRespawnMask{ 0 };
     std::atomic<Respawn::Option> activeRespawnOption{ Respawn::Option::None };
+    std::atomic pendingTransformation{ TransformationType::None };
+    std::atomic pendingTransformationOutcome{ TransformationOutcome::ContinueToTrickDeath };
     RE::ActorHandle killMoveAttacker;
+    RE::ActorHandle borrowedTimeTarget;
+    std::atomic<RE::FormID> borrowedTimeTargetFormID{ 0 };
+    std::atomic_int64_t borrowedTimeDeadlineMilliseconds{ 0 };
 
     std::atomic activeDeathTextCause{ DeathTextCause::Generic };
     std::mutex presentationLock;
@@ -114,6 +133,7 @@ namespace {
     LethalDamageContext pendingLethalDamage;
 
     void FinishRecoveryLater();
+    void ScheduleTransformationRevert(std::uint64_t generation);
 
     std::int64_t GetSteadyMilliseconds() {
         return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -127,6 +147,10 @@ namespace {
             return "Alive";
         case DeathState::PendingKillMove:
             return "PendingKillMove";
+        case DeathState::PendingTransformation:
+            return "PendingTransformation";
+        case DeathState::BorrowedTime:
+            return "BorrowedTime";
         case DeathState::Defeated:
             return "Defeated";
         case DeathState::Resolving:
@@ -135,6 +159,18 @@ namespace {
             return "Recovering";
         case DeathState::LoadingSave:
             return "LoadingSave";
+        }
+        return "Unknown";
+    }
+
+    const char* ToString(TransformationType value) {
+        switch (value) {
+        case TransformationType::None:
+            return "None";
+        case TransformationType::Werewolf:
+            return "Werewolf";
+        case TransformationType::VampireLord:
+            return "VampireLord";
         }
         return "Unknown";
     }
@@ -430,6 +466,85 @@ namespace {
         }
     }
 
+    TransformationType GetTransformationType(RE::PlayerCharacter* player) {
+        const auto* race = player ? player->GetRace() : nullptr;
+        auto* dataHandler = RE::TESDataHandler::GetSingleton();
+        if (!race || !dataHandler) {
+            return TransformationType::None;
+        }
+
+        // The transformation quests can remain running outside beast form, so
+        // the player's current race is the source of truth here.
+        if (race == dataHandler->LookupForm<RE::TESRace>(0xCDD84, "Skyrim.esm")) {
+            return TransformationType::Werewolf;
+        }
+        if (race == dataHandler->LookupForm<RE::TESRace>(0x283A, "Dawnguard.esm")) {
+            return TransformationType::VampireLord;
+        }
+        return TransformationType::None;
+    }
+
+    bool DispatchQuestMethod(
+        RE::TESQuest* quest,
+        std::string_view className,
+        std::string_view function,
+        RE::BSScript::IFunctionArguments* arguments) {
+        auto* vm = RE::BSScript::Internal::VirtualMachine::GetSingleton();
+        auto* policy = vm ? vm->GetObjectHandlePolicy() : nullptr;
+        if (!quest || !vm || !policy) {
+            return false;
+        }
+        const auto handle = policy->GetHandleForObject(RE::FormType::Quest, quest);
+        if (handle == policy->EmptyHandle()) {
+            return false;
+        }
+        RE::BSTSmartPointer<RE::BSScript::IStackCallbackFunctor> callback;
+        return vm->DispatchMethodCall(handle, className, function, arguments, callback);
+    }
+
+    bool RequestTransformationRevert(TransformationType type, RE::PlayerCharacter* player) {
+        auto* dataHandler = RE::TESDataHandler::GetSingleton();
+        if (!dataHandler || !player) {
+            return false;
+        }
+
+        RE::TESQuest* quest = nullptr;
+        switch (type) {
+        case TransformationType::Werewolf:
+            quest = RE::TESForm::LookupByEditorID<RE::TESQuest>("PlayerWerewolfQuest");
+            if (!quest) {
+                quest = dataHandler->LookupForm<RE::TESQuest>(0x2BA16, "Skyrim.esm");
+            }
+            break;
+        case TransformationType::VampireLord:
+            quest = RE::TESForm::LookupByEditorID<RE::TESQuest>("DLC1PlayerVampireQuest");
+            if (!quest) {
+                quest = dataHandler->LookupForm<RE::TESQuest>(0x71D0, "Dawnguard.esm");
+            }
+            if (!quest) {
+                logger::error("[TransformationDeath] Could not resolve DLC1PlayerVampireQuest.");
+                return false;
+            }
+            return DispatchQuestMethod(
+                quest,
+                "DLC1PlayerVampireChangeScript",
+                "Revert",
+                RE::MakeFunctionArguments());
+        case TransformationType::None:
+            return false;
+        }
+        if (!quest) {
+            logger::error("[TransformationDeath] Could not resolve the {} transformation quest.", ToString(type));
+            return false;
+        }
+
+        return DispatchQuestMethod(
+            quest,
+            "Quest",
+            "SetStage",
+            RE::MakeFunctionArguments(std::int32_t{ 100 }));
+    }
+
     void ProtectPlayerForDecision(RE::PlayerCharacter* player, bool applyGhost) {
         auto owner = player->AsActorValueOwner();
         if (owner) {
@@ -478,6 +593,85 @@ namespace {
         Prisma::ShowDeathMenu(activeRespawnMask.load());
     }
 
+    std::uint32_t ResolveBorrowedTimeDurationMilliseconds(RE::PlayerCharacter* player) {
+        const auto baseSeconds = Settings::ResolveNumericValue(
+            Settings::Gameplay.borrowedTimeDuration, player, 1, 600);
+        const auto minimumSeconds = std::min(
+            baseSeconds,
+            Settings::ResolveNumericValue(
+                Settings::Gameplay.borrowedTimeMinimumDuration, player, 1, 600));
+        const auto reductionMode = static_cast<Settings::BorrowedTimeReductionMode>(
+            Settings::Gameplay.borrowedTimeReductionMode);
+        const auto reduction = Settings::ResolveNumericValue(
+            Settings::Gameplay.borrowedTimeReduction,
+            player,
+            0,
+            reductionMode == Settings::BorrowedTimeReductionMode::kPercentage ? 100 : 600);
+        const auto streak = BorrowedTimeManager::GetConsecutiveSuccesses();
+
+        double reducedSeconds = static_cast<double>(baseSeconds);
+        if (reductionMode == Settings::BorrowedTimeReductionMode::kPercentage) {
+            reducedSeconds *= std::pow(
+                1.0 - static_cast<double>(reduction) / 100.0,
+                static_cast<double>(streak));
+        } else {
+            reducedSeconds -= static_cast<double>(reduction) * static_cast<double>(streak);
+        }
+        reducedSeconds = std::max(static_cast<double>(minimumSeconds), reducedSeconds);
+        return static_cast<std::uint32_t>(std::llround(reducedSeconds * 1000.0));
+    }
+
+    bool TryStartBorrowedTime(RE::PlayerCharacter* player) {
+        if (!player || !Settings::Gameplay.borrowedTimeEnabled ||
+            activeDefeatCause.load() == DefeatCause::LethalFall) {
+            borrowedTimeTarget.reset();
+            borrowedTimeTargetFormID.store(0);
+            return false;
+        }
+
+        const auto target = borrowedTimeTarget.get();
+        if (!target || target->IsPlayerRef() || target->IsDead()) {
+            borrowedTimeTarget.reset();
+            borrowedTimeTargetFormID.store(0);
+            return false;
+        }
+
+        auto expected = DeathState::Defeated;
+        if (!state.compare_exchange_strong(expected, DeathState::BorrowedTime)) {
+            return false;
+        }
+
+        const auto duration = ResolveBorrowedTimeDurationMilliseconds(player);
+        const auto generation = defeatGeneration.load();
+        const auto streak = BorrowedTimeManager::GetConsecutiveSuccesses();
+        borrowedTimeDeadlineMilliseconds.store(GetSteadyMilliseconds() + duration);
+        logger::info(
+            "[BorrowedTime] Started: generation={}, target={:08X}, durationMs={}, streak={}.",
+            generation,
+            target->GetFormID(),
+            duration,
+            streak);
+        Prisma::ShowBorrowedTime(duration, streak);
+
+        Utils::DelayedDispatcher::Get().PostDelayed(std::chrono::milliseconds(duration), [generation] {
+            SKSE::GetTaskInterface()->AddTask([generation] {
+                if (generation != defeatGeneration.load()) {
+                    return;
+                }
+                auto expectedState = DeathState::BorrowedTime;
+                if (!state.compare_exchange_strong(expectedState, DeathState::Defeated)) {
+                    return;
+                }
+                logger::info("[BorrowedTime] Expired: generation={}.", generation);
+                borrowedTimeDeadlineMilliseconds.store(0);
+                borrowedTimeTarget.reset();
+                borrowedTimeTargetFormID.store(0);
+                ShowDecisionUI(RE::PlayerCharacter::GetSingleton());
+            });
+        });
+        return true;
+    }
+
     void ApplyDefeatedPoseAndShowMenu(RE::PlayerCharacter* player) {
         if (!player || state.load() != DeathState::Defeated) {
             return;
@@ -497,7 +691,142 @@ namespace {
             activeRecoveryMode.store(DefeatRecoveryMode::Bleedout);
         }
 
-        ShowDecisionUI(player);
+        if (!TryStartBorrowedTime(player)) {
+            ShowDecisionUI(player);
+        }
+    }
+
+    void CompleteTransformation(std::uint64_t generation, std::string_view reason, bool timedOut) {
+        if (generation != defeatGeneration.load() ||
+            state.load() != DeathState::PendingTransformation) {
+            return;
+        }
+
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        if (!player) {
+            logger::error("[TransformationDeath] Player unavailable while completing transformation recovery.");
+            state.store(DeathState::Alive);
+            EndDamageProtection(nullptr, "transformation completion lost player");
+            RestoreControls();
+            return;
+        }
+
+        const auto remainingTransformation = GetTransformationType(player);
+        if (remainingTransformation != TransformationType::None && !timedOut) {
+            return;
+        }
+        if (timedOut && remainingTransformation != TransformationType::None) {
+            logger::error(
+                "[TransformationDeath] Timed out waiting for {} to revert; using the safe fallback.",
+                ToString(remainingTransformation));
+        } else {
+            logger::info(
+                "[TransformationDeath] Reversion completed after '{}'; currentRace={:08X}.",
+                reason,
+                player->GetRace() ? player->GetRace()->GetFormID() : 0);
+        }
+
+        // Both vanilla transformation scripts clear Ghost near the end of ShiftBack.
+        // Restore Trick Death's captured protection until the UI or grace period ends.
+        ApplyTemporaryGhost(player);
+        pendingTransformation.store(TransformationType::None);
+        if (pendingTransformationOutcome.load() == TransformationOutcome::ContinueToTrickDeath) {
+            auto expected = DeathState::PendingTransformation;
+            if (!state.compare_exchange_strong(expected, DeathState::Defeated)) {
+                return;
+            }
+            adoptPendingNativeRagdoll.store(IsAlreadyRagdolled(player));
+            ApplyDefeatedPoseAndShowMenu(player);
+            return;
+        }
+
+        auto expected = DeathState::PendingTransformation;
+        if (!state.compare_exchange_strong(expected, DeathState::Recovering)) {
+            return;
+        }
+        player->GetActorRuntimeData().boolFlags.reset(RE::Actor::BOOL_FLAGS::kNoBleedoutRecovery);
+        player->SetLifeState(RE::ACTOR_LIFE_STATE::kAlive);
+        if (auto* owner = player->AsActorValueOwner()) {
+            const auto maximumHealth = std::max(1.0F, owner->GetPermanentActorValue(RE::ActorValue::kHealth));
+            const auto healthMode = static_cast<Settings::HealthValueMode>(
+                Settings::Gameplay.transformationHealthMode);
+            if (healthMode == Settings::HealthValueMode::kPercentage) {
+                const auto percent = Settings::ResolveNumericValue(
+                    Settings::Gameplay.transformationRecoveryHealth,
+                    player,
+                    1,
+                    100);
+                SetCurrentActorValue(
+                    owner,
+                    RE::ActorValue::kHealth,
+                    maximumHealth * (static_cast<float>(percent) / 100.0F));
+            } else {
+                const auto absolute = Settings::ResolveNumericValue(
+                    Settings::Gameplay.transformationRecoveryHealth,
+                    player,
+                    1,
+                    std::max(1, static_cast<int>(std::ceil(maximumHealth))));
+                SetCurrentActorValue(owner, RE::ActorValue::kHealth, static_cast<float>(absolute));
+            }
+            protectedHealth.store(std::max(1.0F, owner->GetActorValue(RE::ActorValue::kHealth)));
+            logger::info(
+                "[TransformationDeath] Player survived the lethal hit after reversion with health={}/{}.",
+                owner->GetActorValue(RE::ActorValue::kHealth),
+                maximumHealth);
+        }
+        RestoreControls();
+        activeRespawnMask.store(0);
+        activeRespawnOption.store(Respawn::Option::None);
+        FinishRecoveryLater();
+    }
+
+    void ScheduleTransformationCheck(std::uint64_t generation, std::uint32_t attempt) {
+        constexpr std::uint32_t maxAttempts = 80;
+        Utils::DelayedDispatcher::Get().PostDelayed(std::chrono::milliseconds(100), [generation, attempt] {
+            SKSE::GetTaskInterface()->AddTask([generation, attempt] {
+                if (generation != defeatGeneration.load() ||
+                    state.load() != DeathState::PendingTransformation) {
+                    return;
+                }
+                if (GetTransformationType(RE::PlayerCharacter::GetSingleton()) == TransformationType::None) {
+                    CompleteTransformation(generation, "race polling", false);
+                } else if (attempt < maxAttempts) {
+                    ScheduleTransformationCheck(generation, attempt + 1);
+                } else {
+                    CompleteTransformation(generation, "reversion timeout", true);
+                }
+            });
+        });
+    }
+
+    void ScheduleTransformationRevert(std::uint64_t generation) {
+        SKSE::GetTaskInterface()->AddTask([generation] {
+            if (generation != defeatGeneration.load() ||
+                state.load() != DeathState::PendingTransformation) {
+                return;
+            }
+            auto* player = RE::PlayerCharacter::GetSingleton();
+            if (!player) {
+                CompleteTransformation(generation, "missing player", true);
+                return;
+            }
+            player->SetLifeState(RE::ACTOR_LIFE_STATE::kAlive);
+            DeathManager::RepairBlockedPlayerHealth(player);
+            ApplyTemporaryGhost(player);
+            const auto type = pendingTransformation.load();
+            const bool dispatched = RequestTransformationRevert(type, player);
+            logger::info(
+                "[TransformationDeath] Vanilla quest reversion requested: type={}, generation={}, dispatched={}, race={:08X}.",
+                ToString(type),
+                generation,
+                dispatched,
+                player->GetRace() ? player->GetRace()->GetFormID() : 0);
+            if (!dispatched) {
+                CompleteTransformation(generation, "quest reversion dispatch failure", true);
+                return;
+            }
+            ScheduleTransformationCheck(generation, 1);
+        });
     }
 
     void ScheduleImpactDefeatPose(
@@ -536,8 +865,12 @@ namespace {
             return;
         }
 
+        const bool revertTransformation =
+            pendingTransformation.load() != TransformationType::None;
         auto expected = DeathState::PendingKillMove;
-        if (!state.compare_exchange_strong(expected, DeathState::Defeated)) {
+        if (!state.compare_exchange_strong(
+                expected,
+                revertTransformation ? DeathState::PendingTransformation : DeathState::Defeated)) {
             return;
         }
 
@@ -563,7 +896,11 @@ namespace {
 
         killMoveAttacker.reset();
         ApplyTemporaryGhost(player);
-        ApplyDefeatedPoseAndShowMenu(player);
+        if (revertTransformation) {
+            ScheduleTransformationRevert(generation);
+        } else {
+            ApplyDefeatedPoseAndShowMenu(player);
+        }
     }
 
     void ScheduleKillMoveFallback(std::uint64_t generation) {
@@ -624,6 +961,45 @@ namespace {
             return CheckpointManager::MovePlayerToCheckpoint();
         }
         return true;
+    }
+
+    bool IsBorrowedTimeRescuer(
+        RE::Actor* rescuer,
+        RE::Actor* defeatedTarget,
+        RE::PlayerCharacter* player) {
+        if (!rescuer || !player) {
+            return false;
+        }
+        if (rescuer->IsPlayerRef()) {
+            return true;
+        }
+
+        static auto* currentFollowerFaction = [] {
+            auto* dataHandler = RE::TESDataHandler::GetSingleton();
+            return dataHandler ?
+                dataHandler->LookupForm<RE::TESFaction>(0x1CA7D, "Skyrim.esm") : nullptr;
+        }();
+
+        const auto isFollower = [&](RE::Actor* actor) {
+            return actor &&
+                ((currentFollowerFaction && actor->IsInFaction(currentFollowerFaction)) ||
+                 actor->IsPlayerTeammate());
+        };
+
+        auto* current = rescuer;
+        for (std::uint32_t depth = 0; current && depth < 8; ++depth) {
+            if (current->IsPlayerRef() || isFollower(current)) {
+                return true;
+            }
+            const auto commander = current->GetCommandingActor();
+            if (!commander || commander.get() == current) {
+                break;
+            }
+            current = commander.get();
+        }
+
+        return defeatedTarget && !rescuer->IsHostileToActor(player) &&
+            rescuer->IsHostileToActor(defeatedTarget);
     }
 
     void CompleteRespawn(std::uint64_t generation, std::string reason) {
@@ -1063,7 +1439,11 @@ void DeathManager::MarkPlayerFallDamage() {
 void DeathManager::HandlePlayerHitEvent(const RE::TESHitEvent& event) {
     const auto targetReference = event.target.get();
     auto* target = targetReference ? targetReference->As<RE::Actor>() : nullptr;
-    if (!target || !target->IsPlayerRef()) {
+    if (!target) {
+        return;
+    }
+
+    if (!target->IsPlayerRef()) {
         return;
     }
 
@@ -1119,12 +1499,23 @@ bool DeathManager::TryInterceptDeath(
         return true;
     }
 
+    const auto transformation = GetTransformationType(player);
+    const auto transformationMode = static_cast<Settings::TransformationDeathMode>(
+        Settings::Gameplay.transformationDeathMode);
+    const bool handleTransformation =
+        transformation != TransformationType::None &&
+        transformationMode != Settings::TransformationDeathMode::kCurrentBehavior;
+    const bool surviveTransformation =
+        handleTransformation &&
+        transformationMode == Settings::TransformationDeathMode::kRevertAndSurvive;
+
     const auto respawnEvaluation = RespawnPolicyManager::Evaluate();
-    if (respawnEvaluation.trickDeathDisabled || respawnEvaluation.availableMask == 0) {
+    if (respawnEvaluation.trickDeathDisabled ||
+        (!surviveTransformation && respawnEvaluation.availableMask == 0)) {
         return false;
     }
 
-    if (!Prisma::CanShow()) {
+    if (!surviveTransformation && !Prisma::CanShow()) {
         logger::error("Death was not intercepted because PrismaUI is unavailable or not ready.");
         return false;
     }
@@ -1147,13 +1538,22 @@ bool DeathManager::TryInterceptDeath(
     // is a damage cause, not proof that the engine created a ragdoll.
     adoptPendingNativeRagdoll.store(alreadyRagdolled || inKillMove);
     auto expected = DeathState::Alive;
-    const auto nextState = inKillMove ? DeathState::PendingKillMove : DeathState::Defeated;
+    const auto nextState = inKillMove ? DeathState::PendingKillMove :
+        handleTransformation ? DeathState::PendingTransformation : DeathState::Defeated;
     if (!state.compare_exchange_strong(expected, nextState)) {
         return true;
     }
 
-    activeRespawnMask.store(respawnEvaluation.availableMask);
+    pendingTransformation.store(handleTransformation ? transformation : TransformationType::None);
+    pendingTransformationOutcome.store(
+        surviveTransformation ? TransformationOutcome::RecoverWithoutDeath :
+                                TransformationOutcome::ContinueToTrickDeath);
+    activeRespawnMask.store(surviveTransformation ? 0 : respawnEvaluation.availableMask);
     activeRespawnOption.store(Respawn::Option::None);
+    borrowedTimeTarget = !surviveTransformation && killer && killer != player ?
+        killer->GetHandle() : RE::ActorHandle{};
+    borrowedTimeTargetFormID.store(
+        !surviveTransformation && killer && killer != player ? killer->GetFormID() : 0);
 
     activeDefeatCause.store(
         inKillMove ? DefeatCause::KillMove :
@@ -1162,18 +1562,33 @@ bool DeathManager::TryInterceptDeath(
     activeRecoveryMode.store(DefeatRecoveryMode::None);
 
     const auto generation = defeatGeneration.fetch_add(1) + 1;
-    PlayerLootManager::HandleNewDeath();
-    PlayerLootManager::CaptureDeathLocation(player);
-    DeathTrackerManager::RecordDeath(player);
-    UpdateTextContext(player, attacker, deathPresentation);
+    if (!surviveTransformation) {
+        PlayerLootManager::HandleNewDeath();
+        PlayerLootManager::CaptureDeathLocation(player);
+        DeathTrackerManager::RecordDeath(player);
+        UpdateTextContext(player, attacker, deathPresentation);
+    }
     ProtectPlayerForDecision(player, !inKillMove);
-    player->NotifyAnimationGraph("TrickDeathStarted");
-    if (killer && killer != player) {
-        killer->NotifyAnimationGraph("KilledPlayer");
+    if (!surviveTransformation) {
+        player->NotifyAnimationGraph("TrickDeathStarted");
+        if (killer && killer != player) {
+            killer->NotifyAnimationGraph("KilledPlayer");
+        }
+    }
+    if (handleTransformation) {
+        logger::info(
+            "[TransformationDeath] Intercepted lethal damage while transformed: type={}, mode={}, "
+            "killMove={}, generation={}.",
+            ToString(transformation),
+            surviveTransformation ? "RevertAndSurvive" : "RevertThenTrickDeath",
+            inKillMove,
+            generation);
     }
     if (inKillMove) {
         killMoveAttacker = attacker ? attacker->GetHandle() : RE::ActorHandle{};
         ScheduleKillMoveFallback(generation);
+    } else if (handleTransformation) {
+        ScheduleTransformationRevert(generation);
     } else if (projectileImpact || lethalFall) {
         const auto impactCause = projectileImpact ? DefeatCause::Projectile : DefeatCause::LethalFall;
         ScheduleImpactDefeatPose(generation, player->GetHandle(), impactCause);
@@ -1181,6 +1596,59 @@ bool DeathManager::TryInterceptDeath(
         ApplyDefeatedPoseAndShowMenu(player);
     }
     return true;
+}
+
+void DeathManager::HandleActorDeath(RE::FormID dying, RE::ActorHandle killer) {
+    if (state.load() != DeathState::BorrowedTime) {
+        return;
+    }
+    const auto generation = defeatGeneration.load();
+    SKSE::GetTaskInterface()->AddTask([generation, dying, killer] {
+        if (generation != defeatGeneration.load() || state.load() != DeathState::BorrowedTime) {
+            return;
+        }
+
+        const auto expectedTarget = borrowedTimeTarget.get();
+        const auto rescuer = killer.get();
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        const auto expectedTargetFormID = borrowedTimeTargetFormID.load();
+        if (dying == 0 || expectedTargetFormID == 0 || dying != expectedTargetFormID) {
+            return;
+        }
+        if (!IsBorrowedTimeRescuer(rescuer.get(), expectedTarget.get(), player)) {
+            logger::info(
+                "[BorrowedTime] Target {:08X} died, but killer {:08X} was not eligible.",
+                expectedTargetFormID,
+                rescuer ? rescuer->GetFormID() : 0);
+            return;
+        }
+
+        auto expectedState = DeathState::BorrowedTime;
+        if (!state.compare_exchange_strong(expectedState, DeathState::Resolving)) {
+            return;
+        }
+
+        borrowedTimeDeadlineMilliseconds.store(0);
+        borrowedTimeTarget.reset();
+        borrowedTimeTargetFormID.store(0);
+        activeRespawnMask.store(0);
+        activeRespawnOption.store(Respawn::Option::Here);
+        PlayerLootManager::ClearDeathLocation();
+        const auto streak = BorrowedTimeManager::RecordSuccess();
+        logger::info(
+            "[BorrowedTime] Rescue succeeded: generation={}, rescuer={:08X}, streak={}.",
+            generation,
+            rescuer->GetFormID(),
+            streak);
+
+        Prisma::Hide();
+        const bool waitingForRagdoll = RestorePlayer(player);
+        if (!waitingForRagdoll) {
+            state.store(DeathState::Recovering);
+            IntegrationEvents::SendRespawnCompleted(Respawn::Option::Here);
+            FinishRecoveryLater();
+        }
+    });
 }
 
 void DeathManager::HandlePlayerAnimationEvent(
@@ -1254,6 +1722,29 @@ void DeathManager::HandlePlayerAnimationEvent(
     });
 }
 
+void DeathManager::HandlePlayerRaceSwitch(const RE::TESSwitchRaceCompleteEvent& event) {
+    const auto subject = event.subject.get();
+    auto* player = subject ? subject->As<RE::PlayerCharacter>() : nullptr;
+    if (!player || !player->IsPlayerRef() ||
+        state.load() != DeathState::PendingTransformation) {
+        return;
+    }
+
+    const auto generation = defeatGeneration.load();
+    const auto remaining = GetTransformationType(player);
+    logger::info(
+        "[TransformationDeath] Player race-switch event received: generation={}, race={:08X}, "
+        "remainingTransformation={}.",
+        generation,
+        player->GetRace() ? player->GetRace()->GetFormID() : 0,
+        ToString(remaining));
+    Utils::DelayedDispatcher::Get().PostDelayed(std::chrono::milliseconds(100), [generation] {
+        SKSE::GetTaskInterface()->AddTask([generation] {
+            CompleteTransformation(generation, "TESSwitchRaceCompleteEvent", false);
+        });
+    });
+}
+
 bool DeathManager::IsDamageBlocked() {
     return damageProtectionActive.load() || state.load() != DeathState::Alive;
 }
@@ -1284,7 +1775,8 @@ void DeathManager::RepairBlockedPlayerHealth(RE::PlayerCharacter* player) {
 }
 
 bool DeathManager::IsMenuOpen() {
-    return state.load() == DeathState::Defeated;
+    const auto current = state.load();
+    return current == DeathState::BorrowedTime || current == DeathState::Defeated;
 }
 
 std::string DeathManager::GetBackgroundText() {
@@ -1379,6 +1871,8 @@ void DeathManager::Reset() {
     adoptPendingNativeRagdoll.store(false);
     activeRespawnMask.store(0);
     activeRespawnOption.store(Respawn::Option::None);
+    pendingTransformation.store(TransformationType::None);
+    pendingTransformationOutcome.store(TransformationOutcome::ContinueToTrickDeath);
     activeDeathTextCause.store(DeathTextCause::Generic);
     {
         std::scoped_lock lock(presentationLock);
@@ -1389,6 +1883,9 @@ void DeathManager::Reset() {
     PlayerLootManager::ClearDeathLocation();
     ClearAppliedDamageContexts();
     killMoveAttacker.reset();
+    borrowedTimeTarget.reset();
+    borrowedTimeTargetFormID.store(0);
+    borrowedTimeDeadlineMilliseconds.store(0);
     activeDefeatCause.store(DefeatCause::None);
     const auto previousRecoveryMode = activeRecoveryMode.exchange(DefeatRecoveryMode::None);
     Prisma::Hide();

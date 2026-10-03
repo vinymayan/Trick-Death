@@ -30,6 +30,8 @@ namespace DeathManager {
         std::string_view eventName,
         std::string_view payload,
         std::uintptr_t graphSource);
+    void HandlePlayerRaceSwitch(const RE::TESSwitchRaceCompleteEvent& event);
+    void HandleActorDeath(RE::FormID dying, RE::ActorHandle killer);
     void RepairBlockedPlayerHealth(RE::PlayerCharacter* player);
     bool IsDamageBlocked();
     bool IsMenuOpen();

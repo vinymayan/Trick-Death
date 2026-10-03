@@ -17,6 +17,22 @@ namespace Settings {
         kActorValue = 2
     };
 
+    enum class TransformationDeathMode : int {
+        kCurrentBehavior = 0,
+        kRevertThenTrickDeath = 1,
+        kRevertAndSurvive = 2
+    };
+
+    enum class HealthValueMode : int {
+        kPercentage = 0,
+        kAbsolute = 1
+    };
+
+    enum class BorrowedTimeReductionMode : int {
+        kFlat = 0,
+        kPercentage = 1
+    };
+
     enum class ResourceAction : int {
         kSpend = 0,
         kUse = 1
@@ -57,6 +73,14 @@ namespace Settings {
         NumericValueSetting magickaPercent{ 50, 0, "Magicka", ValueSource::kFlat };
         NumericValueSetting staminaPercent{ 50, 0, "Stamina", ValueSource::kFlat };
         NumericValueSetting invulnerabilitySeconds{ 3, 0, "Block", ValueSource::kFlat };
+        int transformationDeathMode = static_cast<int>(TransformationDeathMode::kRevertThenTrickDeath);
+        int transformationHealthMode = static_cast<int>(HealthValueMode::kPercentage);
+        NumericValueSetting transformationRecoveryHealth{ 50, 0, "Health", ValueSource::kFlat };
+        bool borrowedTimeEnabled = true;
+        NumericValueSetting borrowedTimeDuration{ 15, 0, "Health", ValueSource::kFlat };
+        int borrowedTimeReductionMode = static_cast<int>(BorrowedTimeReductionMode::kPercentage);
+        NumericValueSetting borrowedTimeReduction{ 20, 0, "Health", ValueSource::kFlat };
+        NumericValueSetting borrowedTimeMinimumDuration{ 3, 0, "Health", ValueSource::kFlat };
         RespawnResourceCost respawnHereCost;
         RespawnResourceCost lastCheckpointCost;
         RespawnResourceCost lastSleepCost;

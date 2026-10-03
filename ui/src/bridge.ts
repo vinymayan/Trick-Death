@@ -10,6 +10,7 @@ export type DeathMenuSettings = {
     resourceCosts: Record<DeathAction, RespawnResourceStatus>;
     labels: {
         title: string;
+        borrowedTime: string;
         backgroundText: string;
         lastSleep: string;
         checkpoint: string;
@@ -70,6 +71,7 @@ const defaults: DeathMenuSettings = {
     },
     labels: {
         title: 'DEFEATED',
+        borrowedTime: 'BORROWED TIME',
         backgroundText: '',
         lastSleep: 'Respawn at last place slept',
         checkpoint: 'Respawn at last checkpoint',
@@ -84,6 +86,9 @@ const defaults: DeathMenuSettings = {
 
 export const [settings, setSettings] = createSignal<DeathMenuSettings>(defaults);
 export const [visible, setVisible] = createSignal(false);
+export const [screenMode, setScreenMode] = createSignal<'choices' | 'borrowed_time'>('choices');
+export const [borrowedTimeDurationMs, setBorrowedTimeDurationMs] = createSignal(0);
+export const [borrowedTimeStreak, setBorrowedTimeStreak] = createSignal(0);
 export const [availableRespawns, setAvailableRespawns] = createSignal(0);
 export const [errorMessage, setErrorMessage] = createSignal('');
 
@@ -91,6 +96,7 @@ declare global {
     interface Window {
         applyDeathMenuSettings: (payload: string) => void;
         showDeathMenu: (payload: string) => void;
+        showBorrowedTime: (payload: string) => void;
         hideDeathMenu: (payload?: string) => void;
         showDeathMenuError: (message: string) => void;
         deathMenuAction?: (action: string) => void;
@@ -134,8 +140,25 @@ window.showDeathMenu = (payload: string) => {
     const parsed = Number.parseInt(payload, 10);
     setAvailableRespawns(Number.isFinite(parsed) ? parsed : 0);
     setErrorMessage('');
+    setScreenMode('choices');
     setVisible(true);
     window.setTimeout(() => document.querySelector<HTMLButtonElement>('.death-action:not(:disabled)')?.focus(), 0);
+};
+
+window.showBorrowedTime = (payload: string) => {
+    let parsed: { durationMs?: number; streak?: number } = {};
+    try {
+        parsed = JSON.parse(payload) as { durationMs?: number; streak?: number };
+    } catch {
+        return;
+    }
+    const duration = Number(parsed.durationMs);
+    const streak = Number(parsed.streak);
+    setBorrowedTimeDurationMs(Number.isFinite(duration) ? Math.max(1, duration) : 1);
+    setBorrowedTimeStreak(Number.isFinite(streak) ? Math.max(0, Math.trunc(streak)) : 0);
+    setErrorMessage('');
+    setScreenMode('borrowed_time');
+    setVisible(true);
 };
 
 window.hideDeathMenu = () => {

@@ -15,10 +15,14 @@ namespace {
     bool domReady = false;
     bool focused = false;
     bool menuVisible = false;
+    bool borrowedTimeVisible = false;
     bool pendingShow = false;
+    bool pendingBorrowedTime = false;
     bool mouseModeAvailable = false;
     bool mouseModeTriggered = false;
     std::uint32_t pendingAvailableRespawns = 0;
+    std::uint32_t pendingBorrowedTimeDuration = 0;
+    std::int32_t pendingBorrowedTimeStreak = 0;
 
     bool ShouldTriggerMouseMode() {
         const auto inputManager = RE::BSInputDeviceManager::GetSingleton();
@@ -42,6 +46,7 @@ namespace {
     std::string BuildSettingsPayload() {
         const auto title = TextManager::ResolveSlot("title", ModMenu::GetLoc("ui.title", "DEFEATED"));
         const auto backgroundText = DeathManager::GetBackgroundText();
+        const auto borrowedTime = ModMenu::GetLoc("ui.borrowed_time", "BORROWED TIME");
         const auto lastSleep = TextManager::ResolveSlot(
             "respawn_last_sleep",
             ModMenu::GetLoc("ui.last_sleep", "Respawn at last place slept"));
@@ -123,6 +128,8 @@ namespace {
         writer.String(title.c_str());
         writer.Key("backgroundText");
         writer.String(backgroundText.c_str());
+        writer.Key("borrowedTime");
+        writer.String(borrowedTime);
         writer.Key("lastSleep");
         writer.String(lastSleep.c_str());
         writer.Key("checkpoint");
@@ -155,11 +162,12 @@ namespace {
     void SendShow(std::uint32_t availableRespawns) {
         if (!prismaUI || !view || !domReady || !prismaUI->IsValid(view)) {
             pendingShow = true;
+            pendingBorrowedTime = false;
             pendingAvailableRespawns = availableRespawns;
             return;
         }
 
-        const bool wasVisible = menuVisible;
+        const bool wasInteractive = menuVisible && !borrowedTimeVisible;
         SendSettings();
         prismaUI->Show(view);
         const auto payload = std::to_string(availableRespawns);
@@ -170,11 +178,44 @@ namespace {
         }
         focused = prismaUI->Focus(view, Settings::Gameplay.pauseGameWhileMenuOpen);
         menuVisible = true;
-        if (!wasVisible && ShouldTriggerMouseMode()) {
+        borrowedTimeVisible = false;
+        if (!wasInteractive && ShouldTriggerMouseMode()) {
             TriggerMouseModeEvent(false);
             mouseModeTriggered = true;
         }
         pendingShow = false;
+        pendingBorrowedTime = false;
+    }
+
+    void SendBorrowedTime(std::uint32_t durationMilliseconds, std::int32_t streak) {
+        if (!prismaUI || !view || !domReady || !prismaUI->IsValid(view)) {
+            pendingShow = false;
+            pendingBorrowedTime = true;
+            pendingBorrowedTimeDuration = durationMilliseconds;
+            pendingBorrowedTimeStreak = streak;
+            return;
+        }
+
+        SendSettings();
+        prismaUI->Show(view);
+        rapidjson::StringBuffer buffer;
+        rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+        writer.StartObject();
+        writer.Key("durationMs");
+        writer.Uint(durationMilliseconds);
+        writer.Key("streak");
+        writer.Int(streak);
+        writer.EndObject();
+        prismaUI->InteropCall(view, "showBorrowedTime", buffer.GetString());
+        if (focused) {
+            prismaUI->Unfocus(view);
+            focused = false;
+        }
+        focused = prismaUI->Focus(view, false);
+        menuVisible = true;
+        borrowedTimeVisible = true;
+        pendingShow = false;
+        pendingBorrowedTime = false;
     }
 
     bool CreateView() {
@@ -199,7 +240,9 @@ namespace {
             view = readyView;
             domReady = true;
             SendSettings();
-            if (pendingShow) {
+            if (pendingBorrowedTime) {
+                SendBorrowedTime(pendingBorrowedTimeDuration, pendingBorrowedTimeStreak);
+            } else if (pendingShow) {
                 SendShow(pendingAvailableRespawns);
             } else {
                 prismaUI->Hide(view);
@@ -238,7 +281,9 @@ void Prisma::Preload() {
 
 void Prisma::Hide() {
     pendingShow = false;
+    pendingBorrowedTime = false;
     menuVisible = false;
+    borrowedTimeVisible = false;
     if (mouseModeTriggered) {
         TriggerMouseModeEvent(true);
         mouseModeTriggered = false;
@@ -270,9 +315,20 @@ bool Prisma::CanShow() {
 
 void Prisma::ShowDeathMenu(std::uint32_t availableRespawns) {
     pendingShow = true;
+    pendingBorrowedTime = false;
     pendingAvailableRespawns = availableRespawns;
     if (CreateView()) {
         SendShow(availableRespawns);
+    }
+}
+
+void Prisma::ShowBorrowedTime(std::uint32_t durationMilliseconds, std::int32_t streak) {
+    pendingShow = false;
+    pendingBorrowedTime = true;
+    pendingBorrowedTimeDuration = durationMilliseconds;
+    pendingBorrowedTimeStreak = streak;
+    if (CreateView()) {
+        SendBorrowedTime(durationMilliseconds, streak);
     }
 }
 
@@ -289,6 +345,8 @@ void Prisma::ApplyUISettings() {
             prismaUI->Unfocus(view);
             focused = false;
         }
-        focused = prismaUI->Focus(view, Settings::Gameplay.pauseGameWhileMenuOpen);
+        focused = prismaUI->Focus(
+            view,
+            borrowedTimeVisible ? false : Settings::Gameplay.pauseGameWhileMenuOpen);
     }
 }

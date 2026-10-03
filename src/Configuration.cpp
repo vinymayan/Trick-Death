@@ -162,6 +162,32 @@ namespace {
         clampNumeric(Settings::Gameplay.magickaPercent, 0, 100);
         clampNumeric(Settings::Gameplay.staminaPercent, 0, 100);
         clampNumeric(Settings::Gameplay.invulnerabilitySeconds, 0, 30);
+        Settings::Gameplay.transformationDeathMode = std::clamp(
+            Settings::Gameplay.transformationDeathMode,
+            static_cast<int>(Settings::TransformationDeathMode::kCurrentBehavior),
+            static_cast<int>(Settings::TransformationDeathMode::kRevertAndSurvive));
+        Settings::Gameplay.transformationHealthMode = std::clamp(
+            Settings::Gameplay.transformationHealthMode,
+            static_cast<int>(Settings::HealthValueMode::kPercentage),
+            static_cast<int>(Settings::HealthValueMode::kAbsolute));
+        clampNumeric(
+            Settings::Gameplay.transformationRecoveryHealth,
+            1,
+            Settings::Gameplay.transformationHealthMode ==
+                    static_cast<int>(Settings::HealthValueMode::kPercentage) ?
+                100 : 100000);
+        Settings::Gameplay.borrowedTimeReductionMode = std::clamp(
+            Settings::Gameplay.borrowedTimeReductionMode,
+            static_cast<int>(Settings::BorrowedTimeReductionMode::kFlat),
+            static_cast<int>(Settings::BorrowedTimeReductionMode::kPercentage));
+        clampNumeric(Settings::Gameplay.borrowedTimeDuration, 1, 600);
+        clampNumeric(
+            Settings::Gameplay.borrowedTimeReduction,
+            0,
+            Settings::Gameplay.borrowedTimeReductionMode ==
+                    static_cast<int>(Settings::BorrowedTimeReductionMode::kPercentage) ?
+                100 : 600);
+        clampNumeric(Settings::Gameplay.borrowedTimeMinimumDuration, 1, 600);
         for (auto* cost : {
                  &Settings::Gameplay.respawnHereCost,
                  &Settings::Gameplay.lastCheckpointCost,
@@ -953,6 +979,33 @@ namespace {
             gameplay, "stamina", "staminaPercent", Settings::Gameplay.staminaPercent);
         ReadNumericValueSetting(
             gameplay, "invulnerability", "invulnerabilitySeconds", Settings::Gameplay.invulnerabilitySeconds);
+        ReadInt(gameplay, "transformationDeathMode", Settings::Gameplay.transformationDeathMode);
+        ReadInt(gameplay, "transformationHealthMode", Settings::Gameplay.transformationHealthMode);
+        ReadNumericValueSetting(
+            gameplay,
+            "transformationRecoveryHealth",
+            "transformationRecoveryHealthValue",
+            Settings::Gameplay.transformationRecoveryHealth);
+        ReadBool(gameplay, "borrowedTimeEnabled", Settings::Gameplay.borrowedTimeEnabled);
+        ReadInt(
+            gameplay,
+            "borrowedTimeReductionMode",
+            Settings::Gameplay.borrowedTimeReductionMode);
+        ReadNumericValueSetting(
+            gameplay,
+            "borrowedTimeDuration",
+            "borrowedTimeDurationSeconds",
+            Settings::Gameplay.borrowedTimeDuration);
+        ReadNumericValueSetting(
+            gameplay,
+            "borrowedTimeReduction",
+            "borrowedTimeReductionValue",
+            Settings::Gameplay.borrowedTimeReduction);
+        ReadNumericValueSetting(
+            gameplay,
+            "borrowedTimeMinimumDuration",
+            "borrowedTimeMinimumDurationSeconds",
+            Settings::Gameplay.borrowedTimeMinimumDuration);
         if (gameplay.HasMember("respawnCosts") && gameplay["respawnCosts"].IsObject()) {
             const auto& costs = gameplay["respawnCosts"];
             ReadResourceCost(costs, "respawn_here", Settings::Gameplay.respawnHereCost);
@@ -1390,6 +1443,19 @@ void ModMenu::SaveGameplaySettings() {
         Settings::Gameplay.invulnerabilitySeconds.flatValue,
         allocator);
     document.AddMember(
+        "transformationDeathMode",
+        Settings::Gameplay.transformationDeathMode,
+        allocator);
+    document.AddMember(
+        "transformationHealthMode",
+        Settings::Gameplay.transformationHealthMode,
+        allocator);
+    document.AddMember("borrowedTimeEnabled", Settings::Gameplay.borrowedTimeEnabled, allocator);
+    document.AddMember(
+        "borrowedTimeReductionMode",
+        Settings::Gameplay.borrowedTimeReductionMode,
+        allocator);
+    document.AddMember(
         "health",
         MakeNumericValueSetting(Settings::Gameplay.healthPercent, allocator),
         allocator);
@@ -1404,6 +1470,22 @@ void ModMenu::SaveGameplaySettings() {
     document.AddMember(
         "invulnerability",
         MakeNumericValueSetting(Settings::Gameplay.invulnerabilitySeconds, allocator),
+        allocator);
+    document.AddMember(
+        "transformationRecoveryHealth",
+        MakeNumericValueSetting(Settings::Gameplay.transformationRecoveryHealth, allocator),
+        allocator);
+    document.AddMember(
+        "borrowedTimeDuration",
+        MakeNumericValueSetting(Settings::Gameplay.borrowedTimeDuration, allocator),
+        allocator);
+    document.AddMember(
+        "borrowedTimeReduction",
+        MakeNumericValueSetting(Settings::Gameplay.borrowedTimeReduction, allocator),
+        allocator);
+    document.AddMember(
+        "borrowedTimeMinimumDuration",
+        MakeNumericValueSetting(Settings::Gameplay.borrowedTimeMinimumDuration, allocator),
         allocator);
     rapidjson::Value respawnCosts(rapidjson::kObjectType);
     respawnCosts.AddMember(
@@ -1501,6 +1583,77 @@ void ModMenu::GameplayRender() {
         Settings::Gameplay.invulnerabilitySeconds,
         0,
         30);
+
+    ImGui::Separator();
+    ImGui::TextUnformatted(GetLoc("menu.transformation_death", "Death while transformed"));
+    const char* transformationModes[] = {
+        GetLoc("menu.transformation_current", "Current Trick Death behavior"),
+        GetLoc("menu.transformation_revert_death", "Revert, then show Trick Death"),
+        GetLoc("menu.transformation_revert_survive", "Revert and survive")
+    };
+    changed |= ImGui::Combo(
+        GetLoc("menu.transformation_mode", "Transformation death behavior"),
+        &Settings::Gameplay.transformationDeathMode,
+        transformationModes,
+        static_cast<int>(std::size(transformationModes)));
+    if (Settings::Gameplay.transformationDeathMode ==
+        static_cast<int>(Settings::TransformationDeathMode::kRevertAndSurvive)) {
+        const char* healthModes[] = {
+            GetLoc("menu.transformation_health_percentage", "Percentage of maximum health"),
+            GetLoc("menu.transformation_health_absolute", "Absolute health value")
+        };
+        changed |= ImGui::Combo(
+            GetLoc("menu.transformation_health_mode", "Recovery health interpretation"),
+            &Settings::Gameplay.transformationHealthMode,
+            healthModes,
+            static_cast<int>(std::size(healthModes)));
+        changed |= DrawNumericValueSetting(
+            GetLoc("menu.transformation_health", "Health after transformation recovery"),
+            Settings::Gameplay.transformationRecoveryHealth,
+            1,
+            Settings::Gameplay.transformationHealthMode ==
+                    static_cast<int>(Settings::HealthValueMode::kPercentage) ?
+                100 : 100000);
+    }
+
+    ImGui::Separator();
+    ImGui::TextUnformatted(GetLoc("menu.borrowed_time", "Borrowed Time"));
+    changed |= ImGui::Checkbox(
+        GetLoc("menu.borrowed_time_enabled", "Enable Borrowed Time"),
+        &Settings::Gameplay.borrowedTimeEnabled);
+    if (Settings::Gameplay.borrowedTimeEnabled) {
+        changed |= DrawNumericValueSetting(
+            GetLoc("menu.borrowed_time_duration", "Base duration (seconds)"),
+            Settings::Gameplay.borrowedTimeDuration,
+            1,
+            600);
+        const char* reductionModes[] = {
+            GetLoc("menu.borrowed_time_reduction_flat", "Flat seconds"),
+            GetLoc("menu.borrowed_time_reduction_percentage", "Percentage")
+        };
+        changed |= ImGui::Combo(
+            GetLoc("menu.borrowed_time_reduction_mode", "Reduction after each rescue"),
+            &Settings::Gameplay.borrowedTimeReductionMode,
+            reductionModes,
+            static_cast<int>(std::size(reductionModes)));
+        changed |= DrawNumericValueSetting(
+            GetLoc("menu.borrowed_time_reduction", "Reduction amount"),
+            Settings::Gameplay.borrowedTimeReduction,
+            0,
+            Settings::Gameplay.borrowedTimeReductionMode ==
+                    static_cast<int>(Settings::BorrowedTimeReductionMode::kPercentage) ?
+                100 : 600);
+        changed |= DrawNumericValueSetting(
+            GetLoc("menu.borrowed_time_minimum", "Minimum duration (seconds)"),
+            Settings::Gameplay.borrowedTimeMinimumDuration,
+            1,
+            600);
+        ImGui::TextWrapped(
+            "%s",
+            GetLoc(
+                "menu.borrowed_time_note",
+                "An ally must kill the actor who defeated you. Consecutive rescues reset after sleeping."));
+    }
 
     ImGui::Separator();
     ImGui::TextUnformatted(GetLoc("menu.respawn_costs", "Respawn resource costs"));

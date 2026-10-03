@@ -20,8 +20,10 @@ void PlayerAnimationSink::Install() {
     if (auto source = RE::ScriptEventSourceHolder::GetSingleton()) {
         source->AddEventSink<RE::TESObjectLoadedEvent>(this);
         source->AddEventSink<RE::TESHitEvent>(this);
+        source->AddEventSink<RE::TESDeathEvent>(this);
+        source->AddEventSink<RE::TESSwitchRaceCompleteEvent>(this);
         installed_ = true;
-        logger::info("Player animation, hit and load listeners installed.");
+        logger::info("Player animation, hit, death, race-switch and load listeners installed.");
     } else {
         logger::error("Could not install the player 3D load listener.");
     }
@@ -114,6 +116,20 @@ RE::BSEventNotifyControl PlayerAnimationSink::ProcessEvent(
 }
 
 RE::BSEventNotifyControl PlayerAnimationSink::ProcessEvent(
+    const RE::TESDeathEvent* event,
+    RE::BSTEventSource<RE::TESDeathEvent>*) {
+    if (!event || !event->dead) {
+        return RE::BSEventNotifyControl::kContinue;
+    }
+    auto* dying = event->actorDying ? event->actorDying->As<RE::Actor>() : nullptr;
+    auto* killer = event->actorKiller ? event->actorKiller->As<RE::Actor>() : nullptr;
+    DeathManager::HandleActorDeath(
+        dying ? dying->GetFormID() : 0,
+        killer ? killer->GetHandle() : RE::ActorHandle{});
+    return RE::BSEventNotifyControl::kContinue;
+}
+
+RE::BSEventNotifyControl PlayerAnimationSink::ProcessEvent(
     const RE::TESObjectLoadedEvent* event,
     RE::BSTEventSource<RE::TESObjectLoadedEvent>*) {
     if (!event || !event->loaded) {
@@ -124,6 +140,19 @@ RE::BSEventNotifyControl PlayerAnimationSink::ProcessEvent(
     if (player && event->formID == player->GetFormID()) {
         Reconnect();
         DeathTrackerManager::ScheduleGraphSync();
+    }
+    return RE::BSEventNotifyControl::kContinue;
+}
+
+RE::BSEventNotifyControl PlayerAnimationSink::ProcessEvent(
+    const RE::TESSwitchRaceCompleteEvent* event,
+    RE::BSTEventSource<RE::TESSwitchRaceCompleteEvent>*) {
+    if (event) {
+        DeathManager::HandlePlayerRaceSwitch(*event);
+        const auto subject = event->subject.get();
+        if (subject && subject->IsPlayerRef()) {
+            Reconnect();
+        }
     }
     return RE::BSEventNotifyControl::kContinue;
 }

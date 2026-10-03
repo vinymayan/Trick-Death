@@ -1,6 +1,14 @@
 import { onMount, Show, createSignal } from 'solid-js';
 import './app.css';
-import { availableRespawns, errorMessage, settings, visible } from './bridge';
+import {
+    availableRespawns,
+    borrowedTimeDurationMs,
+    borrowedTimeStreak,
+    errorMessage,
+    screenMode,
+    settings,
+    visible,
+} from './bridge';
 import type { DeathAction } from './bridge';
 
 const RESPAWN_HERE = 1;
@@ -92,9 +100,11 @@ function App() {
                         id="death-title"
                         style={`font-size:clamp(${44 * settings().titleTextSizePercent / 100}px,${7 * settings().titleTextSizePercent / 100}vw,${92 * settings().titleTextSizePercent / 100}px)`}
                     >
-                        {settings().labels.title}
+                        {screenMode() === 'borrowed_time'
+                            ? settings().labels.borrowedTime
+                            : settings().labels.title}
                     </h1>
-                    <Show when={settings().labels.backgroundText}>
+                    <Show when={screenMode() === 'choices' && settings().labels.backgroundText}>
                         <p
                             class="death-message"
                             style={`font-size:${18 * settings().backgroundTextSizePercent / 100}px`}
@@ -102,6 +112,20 @@ function App() {
                             {settings().labels.backgroundText}
                         </p>
                     </Show>
+                    <Show when={screenMode() === 'borrowed_time'}>
+                        <div
+                            class="borrowed-time"
+                            aria-label={`${settings().labels.borrowedTime}; streak ${borrowedTimeStreak()}`}
+                        >
+                            <div class="borrowed-time-track">
+                                <div
+                                    class="borrowed-time-progress"
+                                    style={{ 'animation-duration': `${borrowedTimeDurationMs()}ms` }}
+                                />
+                            </div>
+                        </div>
+                    </Show>
+                    <Show when={screenMode() === 'choices'}>
                     <div class="death-actions">
                         <Show when={(availableRespawns() & RESPAWN_HERE) !== 0}>
                             <button
@@ -147,7 +171,8 @@ function App() {
                             </button>
                         </Show>
                     </div>
-                    <Show when={errorMessage()}>
+                    </Show>
+                    <Show when={screenMode() === 'choices' && errorMessage()}>
                         <p class="death-error" role="alert">{errorMessage()}</p>
                     </Show>
                     <div class="death-rule bottom" />

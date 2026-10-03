@@ -1,5 +1,7 @@
 #include "CheckpointManager.h"
 
+#include "BorrowedTimeManager.h"
+
 #include "IntegrationEvents.h"
 #include "RespawnTypes.h"
 
@@ -205,7 +207,10 @@ namespace {
             RE::BSTEventSource<RE::TESSleepStopEvent>*) override
         {
             if (event && !event->interrupted) {
-                SKSE::GetTaskInterface()->AddTask([] { CheckpointManager::CaptureAfterSleep(); });
+                SKSE::GetTaskInterface()->AddTask([] {
+                    BorrowedTimeManager::ResetAfterSleep();
+                    CheckpointManager::CaptureAfterSleep();
+                });
             }
             return RE::BSEventNotifyControl::kContinue;
         }
